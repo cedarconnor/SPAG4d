@@ -380,7 +380,7 @@ class SPAG4DApp {
             depth_model: this.depthModelSelect ? this.depthModelSelect.value : 'panda',
             da3_projection: this.da3ProjectionInput ? this.da3ProjectionInput.value : 'equirectangular',
             guided_filter: this.guidedFilterInput ? this.guidedFilterInput.checked : true,
-            guided_strength: this.guidedStrengthInput ? this.guidedStrengthInput.value : 1.0
+            guided_strength: this.guidedStrengthInput ? this.guidedStrengthInput.value : 0.25
         });
 
         try {

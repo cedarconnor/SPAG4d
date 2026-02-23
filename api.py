@@ -196,7 +196,7 @@ async def convert_panorama(
     depth_model: str = Query("panda"),
     da3_projection: str = Query("equirectangular"),
     guided_filter: bool = Query(True),
-    guided_strength: float = Query(1.0, ge=0.0, le=1.0)
+    guided_strength: float = Query(0.25, ge=0.0, le=1.0)
 ):
     """
     Convert uploaded panorama to Gaussian splat.
@@ -365,7 +365,7 @@ async def process_job(
     color_blend: float = 0.5,
     sky_dome: bool = True,
     da3_projection: str = "equirectangular",
-    guided_strength: float = 1.0
+    guided_strength: float = 0.25
 ):
     """Process conversion job with GPU semaphore."""
     global processor
