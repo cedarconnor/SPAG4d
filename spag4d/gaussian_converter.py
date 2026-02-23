@@ -7,6 +7,7 @@ with latitude-aware anisotropic scaling.
 """
 
 import torch
+import torch.nn.functional as F
 import math
 from typing import Optional
 
@@ -365,8 +366,6 @@ def equirect_to_gaussians_refined(
     Positions and rotations always come from geometric computation
     to maintain 360° consistency.
     """
-    import torch.nn.functional as F
-
     # 1. Compute base Gaussians
     base_gaussians = equirect_to_gaussians(
         image, depth, grid,
@@ -383,44 +382,42 @@ def equirect_to_gaussians_refined(
     # We need to sample refined maps at the valid positions
 
     H_grid, W_grid = grid.theta.shape
-    
-    # Re-compute validity mask to find indices (must match equirect_to_gaussians exactly)
-    # Ideally equirect_to_gaussians should return indices, but we recompute for now.
-    
-    # IMPORTANT: Downsample depth to match grid resolution BEFORE computing mask
-    # This matches equirect_to_gaussians behavior: "depth = depth[stride//2::stride, stride//2::stride]"
     stride = grid.stride
+
+    # Re-compute validity mask — MUST use the same anti-aliased downsampling as
+    # equirect_to_gaussians so the number of valid pixels matches exactly.
     depth_downsampled = depth
     if depth.shape[0] != H_grid or depth.shape[1] != W_grid:
-        depth_downsampled = depth[stride//2::stride, stride//2::stride]
-        
+        if stride > 1:
+            d4 = -depth.unsqueeze(0).unsqueeze(0)
+            p = -F.max_pool2d(d4, kernel_size=stride, stride=stride)
+            depth_downsampled = p.reshape(p.shape[2], p.shape[3])
+        else:
+            depth_downsampled = depth[::stride, ::stride]
+
     valid_mask = (depth_downsampled > depth_min) & (depth_downsampled < depth_max)
-    
+
     if validity_mask is not None:
-        # Downsample passed validity mask too
         mask_downsampled = validity_mask
         if validity_mask.shape[0] != H_grid or validity_mask.shape[1] != W_grid:
-            mask_downsampled = validity_mask[stride//2::stride, stride//2::stride]
-
-        if mask_downsampled.dtype == torch.float32 or mask_downsampled.dtype == torch.float16:
+            if stride > 1:
+                vm = validity_mask.float().unsqueeze(0).unsqueeze(0)
+                p_vm = F.max_pool2d(vm, kernel_size=stride, stride=stride)
+                mask_downsampled = p_vm.reshape(p_vm.shape[2], p_vm.shape[3]) > 0.5
+            else:
+                mask_downsampled = validity_mask[::stride, ::stride]
+        if mask_downsampled.dtype in (torch.float32, torch.float16):
             valid_mask = valid_mask & (mask_downsampled > 0.5)
         else:
             valid_mask = valid_mask & mask_downsampled.bool()
-    
+
     if pole_rows > 0:
         pole_mask = torch.ones_like(valid_mask, dtype=torch.bool)
         pole_mask[:pole_rows, :] = False
         pole_mask[-pole_rows:, :] = False
         valid_mask = valid_mask & pole_mask
 
-    # Ensure mask matches grid downsampling if simple sub-sampling used in equirect_to_gaussians
-    # In equirect_to_gaussians:
-    # if depth.shape != grid.shape: depth = downsampled
-    # But valid_mask calculation uses `depth`.
-    # `depth` passed to this function SHOULD match grid steps if called correctly from core.py
-    # But let's be safe and assume `depth` is the one used for `equirect_to_gaussians`.
-    
-    # We essentially need the flattened mask indices
+    # Flattened indices for sampling SHARP attribute maps
     valid_flat = valid_mask.flatten()
 
     # Helper to sample and flatten map
