@@ -129,8 +129,8 @@ def equirect_to_gaussians(
     # Content-adaptive scale: image gradient → smaller Gaussians in textured/edge
     # areas for detail, larger ones in smooth regions for efficiency.
     img_gray = colors.mean(dim=-1)  # [H_grid, W_grid]
-    gx = F.pad((img_gray[:, 1:] - img_gray[:, :-1]).abs(), (0, 1))
-    gy = F.pad((img_gray[1:, :] - img_gray[:-1, :]).abs(), (1, 0))
+    gx = F.pad((img_gray[:, 1:] - img_gray[:, :-1]).abs(), (0, 1))       # pad right col
+    gy = F.pad((img_gray[1:, :] - img_gray[:-1, :]).abs(), (0, 0, 0, 1)) # pad bottom row
     img_grad = torch.sqrt(gx ** 2 + gy ** 2)
     # detail_factor ∈ [0.3, 1.0]: high gradient → smaller Gaussians
     detail_factor = (1.0 / (1.0 + img_grad * 5.0)).clamp(0.3, 1.0)
@@ -175,8 +175,8 @@ def equirect_to_gaussians(
     # Depth-gradient adaptive opacity: smooth surfaces → high opacity,
     # depth discontinuities (object edges) → lower opacity.
     # This reduces the "paper cutout" look where depth jumps sharply.
-    dx = F.pad(depth[:, 1:] - depth[:, :-1], (0, 1))
-    dy = F.pad(depth[1:, :] - depth[:-1, :], (1, 0))
+    dx = F.pad(depth[:, 1:] - depth[:, :-1], (0, 1))       # pad right col
+    dy = F.pad(depth[1:, :] - depth[:-1, :], (0, 0, 0, 1)) # pad bottom row
     depth_grad = torch.sqrt(dx ** 2 + dy ** 2) / depth.clamp(min=0.1)
     # opacity ∈ [0.49, 0.99]: edges get ~0.49, smooth surfaces get ~0.99
     opacity_map = (0.99 - 0.5 * torch.sigmoid(depth_grad * 10 - 3)).clamp(0.01, 0.99)
