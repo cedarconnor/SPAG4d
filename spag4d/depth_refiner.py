@@ -92,6 +92,9 @@ class GuidedDepthRefiner:
         if strength < 1.0:
             result = result * strength + depth * (1.0 - strength)
 
+        # Prevent guided filter ringing overshoots from pushing depth < 0
+        result = result.clamp(min=1e-4)
+
         return result
 
 

@@ -46,7 +46,7 @@ class PanDAModel:
         device: torch.device,
         depth_min: float = 0.1,
         depth_max: float = 100.0,
-        depth_mapping: str = "log",
+        depth_mapping: str = "linear",
     ):
         self.model = model
         self.device = device
@@ -62,7 +62,7 @@ class PanDAModel:
         device: torch.device = torch.device('cpu'),
         depth_min: float = 0.1,
         depth_max: float = 100.0,
-        depth_mapping: str = "log",
+        depth_mapping: str = "linear",
     ) -> 'PanDAModel':
         """
         Load PanDA model from path or download from HuggingFace.
@@ -244,15 +244,11 @@ class PanDAModel:
                     align_corners=True
                 ).squeeze(1)
 
-            # Scale relative depth (0-1) to pseudo-metric range.
-            # PanDA outputs: higher value = farther away.
-            # Normalize to [0, 1] first (model output may not be exactly 0-1).
-            depth_min_val = depth.min()
-            depth_max_val = depth.max()
-            if depth_max_val > depth_min_val:
-                depth_normalized = (depth - depth_min_val) / (depth_max_val - depth_min_val)
-            else:
-                depth_normalized = torch.zeros_like(depth)
+            # PanDA weights are trained with max_depth=10.0, but loaded with max_depth=1.0.
+            # Its output is raw sigmoid values in [0, 1].
+            # We skip per-image min-max normalization to prevent "breathing" in 
+            # videos and to stop shallow 3-meter rooms from expanding to 100 meters.
+            depth_normalized = depth.clamp(0.0, 1.0)
 
             # Map to pseudo-metric range using the configured mapping.
             # Log-space preserves foreground detail: each order of magnitude
@@ -280,79 +276,3 @@ class PanDAModel:
 
             return depth, mask
 
-    def predict_tiled(
-        self,
-        image: torch.Tensor,
-        n_tiles: int = 4,
-        overlap: float = 0.25,
-    ) -> tuple:
-        """
-        Higher-resolution depth using tiled overlapping inference.
-
-        Splits the ERP horizontally into n_tiles overlapping strips,
-        runs PanDA at full 1022px width on each tile, then blends
-        results in overlap zones with a cosine weight to avoid seams.
-
-        ERP is horizontally wrappable, so the rightmost tile wraps
-        seamlessly onto the leftmost tile.
-
-        Args:
-            image:   [H, W, 3] float32 tensor in [0,1]
-            n_tiles: Number of horizontal strips (default 4)
-            overlap: Fractional overlap on each side (default 0.25)
-
-        Returns:
-            (depth [H, W], None)
-        """
-        H, W = image.shape[:2]
-        device = self.device
-
-        tile_w = W // n_tiles
-        overlap_px = int(tile_w * overlap)
-
-        depth_accum  = torch.zeros(H, W, device=device)
-        weight_accum = torch.zeros(H, W, device=device)
-
-        for t in range(n_tiles):
-            col_start = t * tile_w - overlap_px
-            col_end   = col_start + tile_w + 2 * overlap_px
-
-            # Wrap-around indices (ERP is periodic in azimuth)
-            indices = torch.arange(col_start, col_end, device=device) % W
-            tile_img = image[:, indices, :]  # [H, tile_w+2*ovlp, 3]
-
-            # Predict depth for this strip
-            tile_depth, _ = self.predict(tile_img)  # [H, tile_w+2*ovlp]
-
-            # Normalise tile to [0,1] before blending
-            t_min = tile_depth.min()
-            t_max = tile_depth.max()
-            tile_norm = (tile_depth - t_min) / (t_max - t_min + 1e-8)
-
-            # Cosine blend weight: 1 at centre, 0 at edges
-            tile_len = indices.shape[0]
-            t_linspace = torch.linspace(0.0, math.pi, tile_len, device=device)
-            weight = (0.5 - 0.5 * torch.cos(t_linspace)).unsqueeze(0).expand(H, -1)
-
-            # Scatter-accumulate (handles wrap-around automatically)
-            idx_exp = indices.unsqueeze(0).expand(H, -1)
-            depth_accum.scatter_add_(1, idx_exp, tile_norm * weight)
-            weight_accum.scatter_add_(1, idx_exp, weight)
-
-        # Blend: weighted average gives normalised depth in [0,1]
-        depth_norm = depth_accum / weight_accum.clamp(min=1e-6)
-
-        # Apply configured metric mapping to the blended normalised depth
-        if self.depth_mapping == "log":
-            log_min = math.log(self.depth_min)
-            log_max = math.log(self.depth_max)
-            depth_out = torch.exp(log_min + depth_norm * (log_max - log_min))
-        elif self.depth_mapping == "inverse":
-            inv_max = 1.0 / self.depth_min
-            inv_min = 1.0 / self.depth_max
-            inv_d    = inv_max - depth_norm * (inv_max - inv_min)
-            depth_out = 1.0 / inv_d.clamp(min=1e-6)
-        else:
-            depth_out = self.depth_min + depth_norm * (self.depth_max - self.depth_min)
-
-        return depth_out, None

@@ -193,14 +193,6 @@ class SPAG4D:
         with torch.inference_mode():
             if self.depth_model_name == "da3":
                 depth, validity_mask = self.dap.predict(image_tensor, projection_mode=da3_projection)
-            elif (
-                self.depth_model_name == "panda"
-                and hasattr(self.dap, 'predict_tiled')
-                and W > 2044  # Only tile when image is >2× the 1022px cap
-            ):
-                # Use tiled inference to recover fine depth edges at high res
-                depth, validity_mask = self.dap.predict_tiled(image_tensor.float() / 255.0
-                    if image_tensor.dtype == torch.uint8 else image_tensor.float())
             else:
                 depth, validity_mask = self.dap.predict(image_tensor)
         

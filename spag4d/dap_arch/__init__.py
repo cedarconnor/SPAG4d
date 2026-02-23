@@ -39,7 +39,7 @@ def _flush_dap_module_cache():
     resolve 'networks.*', the failed result gets cached. This purges those
     entries so a fresh import attempt uses the now-correct sys.path.
     """
-    stale_prefixes = ('networks', 'depth_anything_v2_metric', 'dap')
+    stale_prefixes = ('networks', 'depth_anything_v2_metric', 'depth_anything_v2', 'dap')
     for key in list(sys.modules.keys()):
         for prefix in stale_prefixes:
             if key == prefix or key.startswith(prefix + '.'):

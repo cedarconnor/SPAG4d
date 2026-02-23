@@ -56,9 +56,12 @@ def build_panda_model(lora_rank: int = 4):
     # DAP's networks/dap.py is incompatible with PanDA's networks/panda.py —
     # Python won't re-search sys.path for a module already in sys.modules,
     # so we must clear the stale cache before re-importing.
+    stale_prefixes = ('networks', 'depth_anything_v2_metric', 'depth_anything_v2', 'panda')
     for key in list(sys.modules.keys()):
-        if key == 'networks' or key.startswith('networks.'):
-            del sys.modules[key]
+        for prefix in stale_prefixes:
+            if key == prefix or key.startswith(prefix + '.'):
+                del sys.modules[key]
+                break
 
     # Save original working directory
     original_cwd = os.getcwd()
