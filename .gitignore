@@ -97,3 +97,11 @@ dist/
 *.zip
 SPAG4D_Release.zip
 python_embed/
+
+# Unnecessary build/test files
+build_release.bat
+test.html
+test_improvements.py
+test_out.txt
+test_panorama_8k.png
+test_panda_tiles.ply
