@@ -24,9 +24,11 @@ def save_ply_gsplat(
     Performs coordinate transform from internal Y-up to OpenCV Y-down.
     
     Args:
-        gaussians: Dict with means, scales, quats, colors, opacities
+        gaussians: Dict with means, scales, quats, colors, opacities,
+                   and optionally 'sh1' [N,9] SH band-1 coefficients
         path: Output PLY file path
-        sh_degree: SH degree (0 = DC only, 3 = full)
+        sh_degree: SH degree (0 = DC only, 1 = band-1, ...)
+                   Auto-elevated to 1 if gaussians contains 'sh1'.
     """
     # Helper to ensure numpy
     def to_numpy(x):
@@ -107,11 +109,26 @@ def save_ply_gsplat(
     data['nx'] = data['ny'] = data['nz'] = 0  # Unused
     data['f_dc_0'], data['f_dc_1'], data['f_dc_2'] = sh_dc.T
     
-    # Fill SH rest with zeros if present
+    # Fill SH rest coefficients if present
     if sh_degree >= 1:
-        num_rest = (sh_degree + 1) ** 2 * 3 - 3
-        for i in range(num_rest):
-            data[f'f_rest_{i}'] = 0
+        sh1 = gaussians.get('sh1', None)
+        if sh1 is not None:
+            sh1_np = to_numpy(sh1)  # [N, 9]
+            # Write the 9 band-1 coefficients per Gaussian
+            # f_rest ordering in 3DGS PLY: channel-first within each SH function
+            # f_rest_{0..2} = Y_1^-1 for R,G,B
+            # f_rest_{3..5} = Y_1^0  for R,G,B
+            # f_rest_{6..8} = Y_1^1  for R,G,B
+            for i in range(min(9, sh1_np.shape[1])):
+                data[f'f_rest_{i}'] = sh1_np[:, i]
+            # Zero out any remaining higher-band rest coefficients
+            num_rest = (sh_degree + 1) ** 2 * 3 - 3
+            for i in range(9, num_rest):
+                data[f'f_rest_{i}'] = 0
+        else:
+            num_rest = (sh_degree + 1) ** 2 * 3 - 3
+            for i in range(num_rest):
+                data[f'f_rest_{i}'] = 0
     
     data['opacity'] = opacity_logit.squeeze()
     data['scale_0'], data['scale_1'], data['scale_2'] = log_scales.T

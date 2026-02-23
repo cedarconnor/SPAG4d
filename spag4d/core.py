@@ -193,6 +193,14 @@ class SPAG4D:
         with torch.inference_mode():
             if self.depth_model_name == "da3":
                 depth, validity_mask = self.dap.predict(image_tensor, projection_mode=da3_projection)
+            elif (
+                self.depth_model_name == "panda"
+                and hasattr(self.dap, 'predict_tiled')
+                and W > 2044  # Only tile when image is >2× the 1022px cap
+            ):
+                # Use tiled inference to recover fine depth edges at high res
+                depth, validity_mask = self.dap.predict_tiled(image_tensor.float() / 255.0
+                    if image_tensor.dtype == torch.uint8 else image_tensor.float())
             else:
                 depth, validity_mask = self.dap.predict(image_tensor)
         
@@ -315,11 +323,17 @@ class SPAG4D:
                 sky_threshold=sky_threshold,
             )
             if sky_gaussians['means'].shape[0] > 0:
-                for key in gaussians:
+                # Intersect keys in case 'sh1' or other new attributes differ
+                common_keys = set(gaussians.keys()) & set(sky_gaussians.keys())
+                for key in common_keys:
                     gaussians[key] = torch.cat(
                         [gaussians[key], sky_gaussians[key]], dim=0
                     )
         
+        # Auto-elevate sh_degree when band-1 coefficients are available
+        if sh_degree == 0 and 'sh1' in gaussians:
+            sh_degree = 1
+
         # Save output
         output_path = Path(output_path)
         if output_format == "splat":

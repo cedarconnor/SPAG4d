@@ -15,6 +15,7 @@ License: Apache 2.0
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 from pathlib import Path
 from typing import Optional
 import hashlib
@@ -39,19 +40,26 @@ class PanDAModel:
     and outputs relative depth (0-1) which is scaled to a configurable range.
     """
 
-    def __init__(self, model: nn.Module, device: torch.device, depth_min: float = 0.1, depth_max: float = 100.0, depth_mapping: str = "log"):
+    def __init__(
+        self,
+        model: nn.Module,
+        device: torch.device,
+        depth_min: float = 0.1,
+        depth_max: float = 100.0,
+        depth_mapping: str = "log",
+    ):
         self.model = model
         self.device = device
         self.depth_min = depth_min
         self.depth_max = depth_max
-        self.depth_mapping = depth_mapping  # "log", "linear", or "inverse"
+        self.depth_mapping = depth_mapping  # "log", "inverse", or "linear"
         self.model.eval()
 
     @classmethod
     def load(
         cls,
         model_path: Optional[str] = None,
-        device: torch.device = torch.device('cuda'),
+        device: torch.device = torch.device('cpu'),
         depth_min: float = 0.1,
         depth_max: float = 100.0,
         depth_mapping: str = "log",
@@ -115,66 +123,38 @@ class PanDAModel:
         cache_path = PANDA_CACHE_DIR / "panda_large.pth"
 
         if cache_path.exists():
-            # Verify checksum if available
-            if cls._verify_checksum(cache_path):
-                print(f"Using cached PanDA weights: {cache_path}")
-                return str(cache_path)
-            else:
-                print("Cached weights corrupted, re-downloading...")
-                cache_path.unlink()
+            print(f"Using cached PanDA weights: {cache_path}")
+            return str(cache_path)
 
-        # Download with progress
-        print(f"Downloading PanDA weights (~{PANDA_CONFIG['size_mb']}MB)...")
+        print(f"Downloading PanDA weights to {cache_path}...")
+        print("  Size: ~1.5 GB, this may take a few minutes")
 
         try:
-            # Prefer huggingface_hub for resumable downloads
-            from huggingface_hub import hf_hub_download
-            downloaded_path = hf_hub_download(
-                repo_id=PANDA_CONFIG["repo_id"],
-                filename=PANDA_CONFIG["filename"],
-                cache_dir=PANDA_CACHE_DIR,
-                local_dir=PANDA_CACHE_DIR,
-            )
-            return downloaded_path
-        except ImportError:
-            # Fallback to urllib
-            import urllib.request
+            import requests
+            url = PANDA_CONFIG["url"]
+            response = requests.get(url, stream=True, timeout=60)
+            response.raise_for_status()
 
-            try:
-                from tqdm import tqdm
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
 
-                class DownloadProgress(tqdm):
-                    def update_to(self, b=1, bsize=1, tsize=None):
-                        if tsize is not None:
-                            self.total = tsize
-                        self.update(b * bsize - self.n)
+            with open(cache_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total_size > 0:
+                        pct = 100 * downloaded / total_size
+                        if downloaded % (50 * 1024 * 1024) < 8192:
+                            print(f"  Downloaded {downloaded / 1e6:.0f} MB / {total_size / 1e6:.0f} MB ({pct:.0f}%)")
 
-                with DownloadProgress(unit='B', unit_scale=True, miniters=1) as t:
-                    urllib.request.urlretrieve(
-                        PANDA_CONFIG["url"],
-                        cache_path,
-                        reporthook=t.update_to
-                    )
-            except ImportError:
-                # No tqdm, download silently
-                urllib.request.urlretrieve(PANDA_CONFIG["url"], cache_path)
+            print(f"Download complete: {cache_path}")
+            return str(cache_path)
 
-        return str(cache_path)
+        except Exception as e:
+            if cache_path.exists():
+                cache_path.unlink()
+            raise RuntimeError(f"Failed to download PanDA weights: {e}")
 
-    @staticmethod
-    def _verify_checksum(path: Path) -> bool:
-        """Verify file SHA256 checksum."""
-        if not PANDA_CONFIG.get("sha256"):
-            return True  # Skip if no checksum configured
-
-        sha256 = hashlib.sha256()
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(8192), b""):
-                sha256.update(chunk)
-
-        return sha256.hexdigest() == PANDA_CONFIG["sha256"]
-
-    @torch.inference_mode()
     def predict(
         self,
         image: torch.Tensor,
@@ -183,126 +163,196 @@ class PanDAModel:
         """
         Predict depth from equirectangular image(s).
 
-        PanDA outputs relative depth (0-1) which is scaled to
-        pseudo-metric range using depth_min/depth_max.
-
         Args:
-            image: RGB image tensor [H, W, 3] or batch [B, H, W, 3] uint8 or [0,1] float
-            return_mask: Unused (PanDA doesn't output masks), kept for API compat
+            image: [H, W, 3] or [B, H, W, 3] float32 tensor in [0, 1].
+            return_mask: unused, for API compatibility
 
         Returns:
-            Tuple of (depth, mask):
-                - depth: [H, W] or [B, H, W] in pseudo-metric units
-                - mask: None (PanDA doesn't produce validity masks)
+            (depth, mask) where depth has same H, W as input.
         """
-        # Handle batched vs single input
-        is_batched = image.dim() == 4
-        if not is_batched:
-            image = image.unsqueeze(0)  # [1, H, W, 3]
+        with torch.no_grad():
+            is_batched = image.dim() == 4
+            if not is_batched:
+                image = image.unsqueeze(0)  # [1, H, W, 3]
 
-        B, H, W, C = image.shape
+            B, H, W, C = image.shape
 
-        # Preprocess
-        if image.dtype == torch.uint8:
-            image = image.float() / 255.0
+            # Preprocess
+            if image.dtype == torch.uint8:
+                image = image.float() / 255.0
 
-        # PanDA expects [B, C, H, W] normalized with ImageNet stats
-        x = image.permute(0, 3, 1, 2)  # [B, 3, H, W]
+            # PanDA expects [B, C, H, W] normalized with ImageNet stats
+            x = image.permute(0, 3, 1, 2)  # [B, 3, H, W]
 
-        mean = torch.tensor([0.485, 0.456, 0.406], device=self.device).view(1, 3, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225], device=self.device).view(1, 3, 1, 1)
-        x = (x - mean) / std
+            mean = torch.tensor([0.485, 0.456, 0.406], device=self.device).view(1, 3, 1, 1)
+            std = torch.tensor([0.229, 0.224, 0.225], device=self.device).view(1, 3, 1, 1)
+            x = (x - mean) / std
 
-        # PanDA requires dimensions to be multiples of 14 (ViT patch size)
-        # Cap input resolution to prevent OOM
-        MAX_INPUT_WIDTH = 1022
-        did_downscale = False
-        target_H, target_W = H, W
+            # PanDA requires dimensions to be multiples of 14 (ViT patch size)
+            # Cap input resolution to prevent OOM
+            MAX_INPUT_WIDTH = 1022
+            did_downscale = False
+            target_H, target_W = H, W
 
-        if W > MAX_INPUT_WIDTH:
-            scale = MAX_INPUT_WIDTH / W
-            target_H = int(H * scale)
-            target_W = MAX_INPUT_WIDTH
-            did_downscale = True
+            if W > MAX_INPUT_WIDTH:
+                scale = MAX_INPUT_WIDTH / W
+                target_H = int(H * scale)
+                target_W = MAX_INPUT_WIDTH
+                did_downscale = True
 
-        # Ensure multiple of 14
-        target_H = target_H - (target_H % 14)
-        target_W = target_W - (target_W % 14)
+            # Ensure multiple of 14
+            target_H = target_H - (target_H % 14)
+            target_W = target_W - (target_W % 14)
 
-        if target_H != H or target_W != W:
-            x = F.interpolate(x, size=(target_H, target_W), mode='bilinear', align_corners=True)
-            if did_downscale:
-                print(f"[PanDA] Downscaled input {W}×{H} → {target_W}×{target_H} for inference")
+            if target_H != H or target_W != W:
+                x = F.interpolate(x, size=(target_H, target_W), mode='bilinear', align_corners=True)
+                if did_downscale:
+                    print(f"[PanDA] Downscaled input {W}x{H} -> {target_W}x{target_H} for inference")
 
-        # Run model with OOM fallback
-        try:
-            output = self.model(x)
-        except torch.cuda.OutOfMemoryError:
-            # Fallback: process one at a time
-            torch.cuda.empty_cache()
-            depths = []
-            for i in range(B):
-                out_i = self.model(x[i:i+1])
-                if isinstance(out_i, dict):
-                    depths.append(out_i['pred_depth'])
-                else:
-                    depths.append(out_i)
-            depth = torch.cat(depths, dim=0)
-            output = {'pred_depth': depth}
+            # Run model with OOM fallback
+            try:
+                output = self.model(x)
+            except torch.cuda.OutOfMemoryError:
+                # Fallback: process one at a time
+                torch.cuda.empty_cache()
+                depths = []
+                for i in range(B):
+                    out_i = self.model(x[i:i+1])
+                    if isinstance(out_i, dict):
+                        depths.append(out_i['pred_depth'])
+                    else:
+                        depths.append(out_i)
+                depth = torch.cat(depths, dim=0)
+                output = {'pred_depth': depth}
 
-        # Handle different output formats
-        if isinstance(output, dict):
-            depth = output['pred_depth']
-        else:
-            depth = output
+            # Handle different output formats
+            if isinstance(output, dict):
+                depth = output['pred_depth']
+            else:
+                depth = output
 
-        # Remove channel dim if present [B, 1, H, W] -> [B, H, W]
-        if depth.dim() == 4:
-            depth = depth.squeeze(1)
+            # Remove channel dim if present [B, 1, H, W] -> [B, H, W]
+            if depth.dim() == 4:
+                depth = depth.squeeze(1)
 
-        # Interpolate to original resolution if needed
-        if depth.shape[-2] != H or depth.shape[-1] != W:
-            depth = F.interpolate(
-                depth.unsqueeze(1),
-                size=(H, W),
-                mode='bilinear',
-                align_corners=True
-            ).squeeze(1)
+            # Interpolate to original resolution if needed
+            if depth.shape[-2] != H or depth.shape[-1] != W:
+                depth = F.interpolate(
+                    depth.unsqueeze(1),
+                    size=(H, W),
+                    mode='bilinear',
+                    align_corners=True
+                ).squeeze(1)
 
-        # Scale relative depth (0-1) to pseudo-metric range.
-        # PanDA outputs: higher value = farther away.
-        # Normalize to [0, 1] first (model output may not be exactly 0-1).
-        depth_min_val = depth.min()
-        depth_max_val = depth.max()
-        if depth_max_val > depth_min_val:
-            depth_normalized = (depth - depth_min_val) / (depth_max_val - depth_min_val)
-        else:
-            depth_normalized = torch.zeros_like(depth)
+            # Scale relative depth (0-1) to pseudo-metric range.
+            # PanDA outputs: higher value = farther away.
+            # Normalize to [0, 1] first (model output may not be exactly 0-1).
+            depth_min_val = depth.min()
+            depth_max_val = depth.max()
+            if depth_max_val > depth_min_val:
+                depth_normalized = (depth - depth_min_val) / (depth_max_val - depth_min_val)
+            else:
+                depth_normalized = torch.zeros_like(depth)
 
-        # Map to pseudo-metric range using the configured mapping.
-        # Log-space preserves foreground detail: each order of magnitude
-        # (0.1–1m, 1–10m, 10–100m) gets equal representation.
+            # Map to pseudo-metric range using the configured mapping.
+            # Log-space preserves foreground detail: each order of magnitude
+            # (0.1–1m, 1–10m, 10–100m) gets equal representation.
+            if self.depth_mapping == "log":
+                log_min = math.log(self.depth_min)
+                log_max = math.log(self.depth_max)
+                depth = torch.exp(log_min + depth_normalized * (log_max - log_min))
+            elif self.depth_mapping == "inverse":
+                # Disparity-linear (matches monocular model training signal)
+                inv_max = 1.0 / self.depth_min
+                inv_min = 1.0 / self.depth_max
+                inv_depth = inv_max - depth_normalized * (inv_max - inv_min)
+                depth = 1.0 / inv_depth.clamp(min=1e-6)
+            else:
+                # Linear (legacy behaviour)
+                depth = self.depth_min + depth_normalized * (self.depth_max - self.depth_min)
+
+            # Remove batch dim for single image input
+            if not is_batched:
+                depth = depth.squeeze(0)
+
+            # PanDA doesn't output masks
+            mask = None
+
+            return depth, mask
+
+    def predict_tiled(
+        self,
+        image: torch.Tensor,
+        n_tiles: int = 4,
+        overlap: float = 0.25,
+    ) -> tuple:
+        """
+        Higher-resolution depth using tiled overlapping inference.
+
+        Splits the ERP horizontally into n_tiles overlapping strips,
+        runs PanDA at full 1022px width on each tile, then blends
+        results in overlap zones with a cosine weight to avoid seams.
+
+        ERP is horizontally wrappable, so the rightmost tile wraps
+        seamlessly onto the leftmost tile.
+
+        Args:
+            image:   [H, W, 3] float32 tensor in [0,1]
+            n_tiles: Number of horizontal strips (default 4)
+            overlap: Fractional overlap on each side (default 0.25)
+
+        Returns:
+            (depth [H, W], None)
+        """
+        H, W = image.shape[:2]
+        device = self.device
+
+        tile_w = W // n_tiles
+        overlap_px = int(tile_w * overlap)
+
+        depth_accum  = torch.zeros(H, W, device=device)
+        weight_accum = torch.zeros(H, W, device=device)
+
+        for t in range(n_tiles):
+            col_start = t * tile_w - overlap_px
+            col_end   = col_start + tile_w + 2 * overlap_px
+
+            # Wrap-around indices (ERP is periodic in azimuth)
+            indices = torch.arange(col_start, col_end, device=device) % W
+            tile_img = image[:, indices, :]  # [H, tile_w+2*ovlp, 3]
+
+            # Predict depth for this strip
+            tile_depth, _ = self.predict(tile_img)  # [H, tile_w+2*ovlp]
+
+            # Normalise tile to [0,1] before blending
+            t_min = tile_depth.min()
+            t_max = tile_depth.max()
+            tile_norm = (tile_depth - t_min) / (t_max - t_min + 1e-8)
+
+            # Cosine blend weight: 1 at centre, 0 at edges
+            tile_len = indices.shape[0]
+            t_linspace = torch.linspace(0.0, math.pi, tile_len, device=device)
+            weight = (0.5 - 0.5 * torch.cos(t_linspace)).unsqueeze(0).expand(H, -1)
+
+            # Scatter-accumulate (handles wrap-around automatically)
+            idx_exp = indices.unsqueeze(0).expand(H, -1)
+            depth_accum.scatter_add_(1, idx_exp, tile_norm * weight)
+            weight_accum.scatter_add_(1, idx_exp, weight)
+
+        # Blend: weighted average gives normalised depth in [0,1]
+        depth_norm = depth_accum / weight_accum.clamp(min=1e-6)
+
+        # Apply configured metric mapping to the blended normalised depth
         if self.depth_mapping == "log":
-            import math
             log_min = math.log(self.depth_min)
             log_max = math.log(self.depth_max)
-            depth = torch.exp(log_min + depth_normalized * (log_max - log_min))
+            depth_out = torch.exp(log_min + depth_norm * (log_max - log_min))
         elif self.depth_mapping == "inverse":
-            # Disparity-linear (matches monocular model training signal)
             inv_max = 1.0 / self.depth_min
             inv_min = 1.0 / self.depth_max
-            inv_depth = inv_max - depth_normalized * (inv_max - inv_min)
-            depth = 1.0 / inv_depth.clamp(min=1e-6)
+            inv_d    = inv_max - depth_norm * (inv_max - inv_min)
+            depth_out = 1.0 / inv_d.clamp(min=1e-6)
         else:
-            # Linear (legacy behaviour)
-            depth = self.depth_min + depth_normalized * (self.depth_max - self.depth_min)
+            depth_out = self.depth_min + depth_norm * (self.depth_max - self.depth_min)
 
-        # Remove batch dim for single image input
-        if not is_batched:
-            depth = depth.squeeze(0)
-
-        # PanDA doesn't output masks
-        mask = None
-
-        return depth, mask
-
+        return depth_out, None

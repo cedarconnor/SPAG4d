@@ -1,0 +1,14 @@
+xFormers not available
+xFormers not available
+Testing SPAG-4D Tier 2/3 Improvements...
+CUDA Available: True
+Using cached PanDA weights: C:\Users\Cedar\.cache\spag4d\panda_large.pth
+
+[SUCCESS] PanDA core initialized successfully
+[PanDA] Downscaled input 1500x2000 -> 1022x1358 for inference
+[PanDA] Downscaled input 1500x2000 -> 1022x1358 for inference
+[PanDA] Downscaled input 1500x2000 -> 1022x1358 for inference
+[PanDA] Downscaled input 1500x2000 -> 1022x1358 for inference
+Saved 494,048 Gaussians to test_panda_tiles.ply (SH degree 1)
+[SUCCESS] Tiled PanDA + Pole Merge + SH band-1 + Sky Dome succeeded: 494048 splats
+[SUCCESS] PLY SH Band-1 coefficients present: True

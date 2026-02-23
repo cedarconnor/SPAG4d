@@ -105,12 +105,80 @@ def equirect_to_gaussians(
         else:
             valid_mask = valid_mask & validity_mask.bool()
     
-    # Exclude poles
+    # ─────────────────────────────────────────────────────────────────
+    # Rotation Matrix → Quaternion
+    # ─────────────────────────────────────────────────────────────────
+    # Build rotation matrix R where columns are [right, up, normal]
+    # Normal points inward (toward camera), same as -rhat
+    normal = -grid.rhat
+    right = grid.tangent_right
+    up = grid.tangent_up
+    
+    # R = [right | up | normal] as column vectors
+    R = torch.stack([right, up, normal], dim=-1)  # [H, W, 3, 3]
+    
+    # Convert to quaternion
+    quats = rotation_matrix_to_quaternion(R)  # [H, W, 4] in XYZW
+
+    # Poles: instead of excluding top/bottom rows, merge them into fewer
+    # larger Gaussians (ERP grid converges at the poles, so many pixels
+    # map to nearly the same 3D direction).
+    pole_means_list = []
+    pole_scales_list = []
+    pole_quats_list = []
+    pole_colors_list = []
+    pole_opacities_list = []
+
     if pole_rows > 0:
+        # Exclude the pole band from the regular valid_mask
         pole_mask = torch.ones_like(valid_mask, dtype=torch.bool)
         pole_mask[:pole_rows, :] = False
         pole_mask[-pole_rows:, :] = False
         valid_mask = valid_mask & pole_mask
+
+        # Collect pole rows separately — merge every merge_factor pixels along azimuth
+        W_grid = valid_mask.shape[1]
+        for row_idx in range(pole_rows):
+            for top_bottom in (0, 1):  # 0 = north pole, 1 = south pole
+                r = row_idx if top_bottom == 0 else (-(row_idx + 1))
+                # More merging for rows closer to the actual pole
+                merge_factor = max(2, W_grid // (4 * (row_idx + 1)))
+                num_merged = W_grid // merge_factor
+                if num_merged == 0:
+                    continue
+
+                for col_start in range(num_merged):
+                    c_s = col_start * merge_factor
+                    c_e = c_s + merge_factor
+                    # Average depth over the azimuthal window
+                    d_window = depth[r, c_s:c_e]
+                    if d_window.numel() == 0:
+                        continue
+                    d_avg = d_window.mean()
+                    if d_avg <= depth_min or d_avg >= depth_max:
+                        continue
+
+                    # Use center pixel's direction
+                    c_mid = c_s + merge_factor // 2
+                    mean_pos = d_avg.unsqueeze(-1) * grid.rhat[r, c_mid]
+                    # Larger scale: covers merge_factor pixels worth of angle
+                    scale_az = scale_factor * d_avg * torch.sin(grid.phi[r, c_mid]).clamp(min=0.01) \
+                               * (2 * math.pi / W) * merge_factor
+                    scale_el = scale_factor * d_avg * (math.pi / H) * stride
+                    scale_n = torch.minimum(scale_az, scale_el) * thickness_ratio
+                    sc = torch.stack([scale_az, scale_el, scale_n])
+                    qt = quats[r, c_mid]
+                    col = colors[r, c_s:c_e].mean(dim=0)
+
+                    dx_p = d_window[1:] - d_window[:-1] if d_window.numel() > 1 else torch.zeros(1, device=device)
+                    dg = dx_p.abs().mean() / d_avg.clamp(min=0.1)
+                    op = (0.99 - 0.5 * torch.sigmoid(dg * 10 - 3)).clamp(0.01, 0.99).unsqueeze(-1)
+
+                    pole_means_list.append(mean_pos)
+                    pole_scales_list.append(sc)
+                    pole_quats_list.append(qt)
+                    pole_colors_list.append(col)
+                    pole_opacities_list.append(op)
     
     # ─────────────────────────────────────────────────────────────────
     # 3D Positions: P = depth * r̂
@@ -146,49 +214,118 @@ def equirect_to_gaussians(
     # Stack: [azimuth, elevation, normal]
     scales = torch.stack([s_azimuth, s_elevation, s_normal], dim=-1)
     
-    # ─────────────────────────────────────────────────────────────────
-    # Rotation Matrix → Quaternion
-    # ─────────────────────────────────────────────────────────────────
-    # Build rotation matrix R where columns are [right, up, normal]
-    # Normal points inward (toward camera), same as -rhat
-    normal = -grid.rhat
-    right = grid.tangent_right
-    up = grid.tangent_up
-    
-    # R = [right | up | normal] as column vectors
-    R = torch.stack([right, up, normal], dim=-1)  # [H, W, 3, 3]
-    
-    # Convert to quaternion
-    quats = rotation_matrix_to_quaternion(R)  # [H, W, 4] in XYZW
+    # (Quaternion generation moved up to satisfy pole merging logic)
     
     # ─────────────────────────────────────────────────────────────────
-    # Flatten and filter by validity mask
+    # SH Band-1 — First-order view-dependent color coefficients
     # ─────────────────────────────────────────────────────────────────
-    valid_flat = valid_mask.flatten()
-    
-    means_flat = means.reshape(-1, 3)[valid_flat]
-    scales_flat = scales.reshape(-1, 3)[valid_flat]
-    quats_flat = quats.reshape(-1, 4)[valid_flat]
-    colors_flat = colors.reshape(-1, 3)[valid_flat]
-    
-    N = means_flat.shape[0]
+    # From a single ERP panorama, the image gradient encodes how color
+    # changes with viewing direction. Map ERP gradient → 3D gradient
+    # via the spherical-coordinate Jacobian, then divide by SH_C1.
+    # SH_C1 = sqrt(3 / (4π)) ≈ 0.4886.  Band-1 basis: y, z, x.
+    SH_C1 = 0.4886025119029199
+    theta = grid.theta   # [H_grid, W_grid]  azimuth
+    phi   = grid.phi     # elevation from equator
 
-    # Depth-gradient adaptive opacity: smooth surfaces → high opacity,
-    # depth discontinuities (object edges) → lower opacity.
-    # This reduces the "paper cutout" look where depth jumps sharply.
-    dx = F.pad(depth[:, 1:] - depth[:, :-1], (0, 1))       # pad right col
-    dy = F.pad(depth[1:, :] - depth[:-1, :], (0, 0, 0, 1)) # pad bottom row
-    depth_grad = torch.sqrt(dx ** 2 + dy ** 2) / depth.clamp(min=0.1)
-    # opacity ∈ [0.49, 0.99]: edges get ~0.49, smooth surfaces get ~0.99
-    opacity_map = (0.99 - 0.5 * torch.sigmoid(depth_grad * 10 - 3)).clamp(0.01, 0.99)
-    opacities_flat = opacity_map.flatten()[valid_flat].unsqueeze(-1)
+    # Image gradient in ERP pixel coordinates
+    # gx = dColor/dTheta (horizontal), gy = dColor/dPhi (vertical)
+    col_r = colors[..., 0]; col_g = colors[..., 1]; col_b = colors[..., 2]
+    def _grad(ch):
+        gx_c = F.pad((ch[:, 1:] - ch[:, :-1]), (0, 1))
+        gy_c = F.pad((ch[1:, :] - ch[:-1, :]), (0, 0, 0, 1))
+        return gx_c, gy_c
+    gx_r, gy_r = _grad(col_r)
+    gx_g, gy_g = _grad(col_g)
+    gx_b, gy_b = _grad(col_b)
+
+    # Jacobian: (dtheta/dx3d, dphi/dx3d) in terms of x,y,z on unit sphere
+    #   theta = atan2(z, x),  phi = asin(y)
+    # dtheta/dx = -z/(x²+z²),  dtheta/dy = 0,       dtheta/dz = x/(x²+z²)
+    # dphi/dx   = -xy/sqrt(...), dphi/dy = sqrt(x²+z²), dphi/dz = -yz/sqrt(...)
+    rx = grid.rhat[..., 0]  # x component of unit direction
+    ry = grid.rhat[..., 1]  # y
+    rz = grid.rhat[..., 2]  # z
+    xz2 = (rx ** 2 + rz ** 2).clamp(min=1e-6)
+    r2  = (rx ** 2 + ry ** 2 + rz ** 2).clamp(min=1e-6)
+    sqrt_xz2 = xz2.sqrt()
+
+    dtheta_dx = -rz / xz2
+    dtheta_dz =  rx / xz2
+    # dphi relies on y-up convention: phi = asin(y), rhat on unit sphere
+    dphi_dx = -rx * ry / (r2 * sqrt_xz2)
+    dphi_dy =  sqrt_xz2 / r2
+    dphi_dz = -rz * ry / (r2 * sqrt_xz2)
+
+    # dColor/d(3d-direction) for each channel
+    def _dc3d(gx_c, gy_c):
+        dc_dx = gx_c * dtheta_dx + gy_c * dphi_dx
+        dc_dy = gx_c * 0         + gy_c * dphi_dy
+        dc_dz = gx_c * dtheta_dz + gy_c * dphi_dz
+        return dc_dx, dc_dy, dc_dz
+    dcr_dx, dcr_dy, dcr_dz = _dc3d(gx_r, gy_r)
+    dcg_dx, dcg_dy, dcg_dz = _dc3d(gx_g, gy_g)
+    dcb_dx, dcb_dy, dcb_dz = _dc3d(gx_b, gy_b)
+
+    # SH band-1 coefficients: coeff = dC/d(basis_dir) / SH_C1
+    # Ordering matches 3DGS PLY: f_rest_{0..2}=Y_1^-1 (y-axis), {3..5}=Y_1^0 (z), {6..8}=Y_1^1 (x)
+    # Clamp to reasonable range to avoid artifacts from large gradients at edges
+    valid_mask_flat = valid_mask.flatten()
+    def _sh1(dc):
+        return (dc / SH_C1).clamp(-5.0, 5.0).flatten()[valid_mask_flat]
+    sh1_r_y = _sh1(dcr_dy); sh1_g_y = _sh1(dcg_dy); sh1_b_y = _sh1(dcb_dy)  # Y_1^-1
+    sh1_r_z = _sh1(dcr_dz); sh1_g_z = _sh1(dcg_dz); sh1_b_z = _sh1(dcb_dz)  # Y_1^0
+    sh1_r_x = _sh1(dcr_dx); sh1_g_x = _sh1(dcg_dx); sh1_b_x = _sh1(dcb_dx)  # Y_1^1
+
+    # Stack [N, 9]: R_y G_y B_y  R_z G_z B_z  R_x G_x B_x
+    sh1_flat = torch.stack([
+        sh1_r_y, sh1_g_y, sh1_b_y,
+        sh1_r_z, sh1_g_z, sh1_b_z,
+        sh1_r_x, sh1_g_x, sh1_b_x,
+    ], dim=-1)  # [N, 9]
+
+    # ─────────────────────────────────────────────────────────────────
+    # Merge pole Gaussians into output
+    # ─────────────────────────────────────────────────────────────────
+    valid_mask_flat = valid_mask.flatten()
+    means_flat = means.reshape(-1, 3)[valid_mask_flat]
+    scales_flat = scales.reshape(-1, 3)[valid_mask_flat]
+    quats_flat = quats.reshape(-1, 4)[valid_mask_flat]
+    colors_flat = colors.reshape(-1, 3)[valid_mask_flat]
     
+    # Opacities
+    if default_opacity < 0:
+        # Use depth gradient to define opacity (Item 4)
+        dx = F.pad(depth[:, 1:] - depth[:, :-1], (0, 1))
+        dy = F.pad(depth[1:, :] - depth[:-1, :], (0, 0, 0, 1))
+        grad_mag = torch.sqrt(dx**2 + dy**2) / depth.clamp(min=0.1)
+        # Smooth surface -> high opacity, huge jump -> low opacity
+        opms = (0.99 - 0.5 * torch.sigmoid(grad_mag * 10 - 3)).unsqueeze(-1)
+        opacities_flat = opms.reshape(-1, 1)[valid_mask_flat]
+    else:
+        # Constant opacity fallback
+        opacities_flat = torch.full((means_flat.shape[0], 1), default_opacity, device=device)
+    if pole_means_list:
+        pm = torch.stack(pole_means_list, dim=0)
+        ps = torch.stack(pole_scales_list, dim=0)
+        pq = torch.stack(pole_quats_list, dim=0)
+        pc = torch.stack(pole_colors_list, dim=0)
+        po = torch.stack(pole_opacities_list, dim=0)
+        pole_sh1 = torch.zeros(pm.shape[0], 9, device=device)
+
+        means_flat     = torch.cat([means_flat,     pm], dim=0)
+        scales_flat    = torch.cat([scales_flat,    ps], dim=0)
+        quats_flat     = torch.cat([quats_flat,     pq], dim=0)
+        colors_flat    = torch.cat([colors_flat,    pc], dim=0)
+        opacities_flat = torch.cat([opacities_flat, po], dim=0)
+        sh1_flat       = torch.cat([sh1_flat,       pole_sh1], dim=0)
+
     return {
-        'means': means_flat,
-        'scales': scales_flat,
-        'quats': quats_flat,
-        'colors': colors_flat,
-        'opacities': opacities_flat
+        'means':     means_flat,
+        'scales':    scales_flat,
+        'quats':     quats_flat,
+        'colors':    colors_flat,
+        'opacities': opacities_flat,
+        'sh1':       sh1_flat,    # [N, 9] SH band-1 coefficients
     }
 
 
@@ -293,6 +430,7 @@ def generate_sky_dome(
             'quats': torch.zeros(0, 4, device=device),
             'colors': torch.zeros(0, 3, device=device),
             'opacities': torch.zeros(0, 1, device=device),
+            'sh1': torch.zeros(0, 9, device=device),
         }
     
     # Place sky Gaussians at fixed distance along the ray direction
@@ -329,6 +467,7 @@ def generate_sky_dome(
     
     N = means_flat.shape[0]
     opacities_flat = torch.full((N, 1), dome_opacity, device=device)
+    sh1_flat = torch.zeros((N, 9), device=device)
     
     return {
         'means': means_flat,
@@ -336,6 +475,7 @@ def generate_sky_dome(
         'quats': quats_flat,
         'colors': colors_flat,
         'opacities': opacities_flat,
+        'sh1': sh1_flat,
     }
 
 
@@ -445,12 +585,17 @@ def equirect_to_gaussians_refined(
         else:
              return resized.reshape(-1, channels)[valid_flat]
 
+    # The base_gaussians might contain extra merged pole Gaussians at the end.
+    # ref_*_flat only matches the size of the non-merged valid pixels.
+    # So we apply refinement only to the first N_base elements.
+
     # Refine Opacity
     if refined_attrs.opacities is not None and opacity_blend > 0:
         ref_opacities_flat = sample_map(refined_attrs.opacities, 1)
-        # Blend
-        base_gaussians['opacities'] = (
-            (1 - opacity_blend) * base_gaussians['opacities'] +
+        N_base = ref_opacities_flat.shape[0]
+        # Blend only the non-pole portion
+        base_gaussians['opacities'][:N_base] = (
+            (1 - opacity_blend) * base_gaussians['opacities'][:N_base] +
             opacity_blend * ref_opacities_flat
         ).clamp(0.01, 0.99)
 
@@ -459,27 +604,30 @@ def equirect_to_gaussians_refined(
         ref_scales_flat  = sample_map(refined_attrs.scales, 3)
         ref_opacity_flat = sample_map(refined_attrs.opacities, 1) if refined_attrs.opacities is not None else None
 
+        N_base = ref_scales_flat.shape[0]
+        
         # Normalize SHARP scales to get relative variation multiplier
         scale_mult = ref_scales_flat / (ref_scales_flat.mean() + 1e-6)
         scale_mult = scale_mult.clamp(0.5, 2.0)
 
         if ref_opacity_flat is not None:
             # High SHARP opacity → confident surface → allow stronger SHARP influence
-            confidence = ref_opacity_flat.clamp(0.1, 0.9)  # [N, 1]
+            confidence = ref_opacity_flat.clamp(0.1, 0.9)  # [N_base, 1]
             adaptive_blend = (scale_blend * confidence).clamp(0.0, 1.0)
         else:
             adaptive_blend = scale_blend
 
-        base_gaussians['scales'] = (
-            (1 - adaptive_blend) * base_gaussians['scales'] +
-            adaptive_blend * base_gaussians['scales'] * scale_mult
+        base_gaussians['scales'][:N_base] = (
+            (1 - adaptive_blend) * base_gaussians['scales'][:N_base] +
+            adaptive_blend * base_gaussians['scales'][:N_base] * scale_mult
         )
 
     # Refine Colors (blend with source to preserve fidelity)
     if refined_attrs.colors is not None and color_blend > 0:
         ref_colors_flat = sample_map(refined_attrs.colors, 3).clamp(0, 1)
-        base_gaussians['colors'] = (
-            (1 - color_blend) * base_gaussians['colors'] +
+        N_base = ref_colors_flat.shape[0]
+        base_gaussians['colors'][:N_base] = (
+            (1 - color_blend) * base_gaussians['colors'][:N_base] +
             color_blend * ref_colors_flat
         )
 
