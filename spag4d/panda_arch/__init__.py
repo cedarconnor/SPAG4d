@@ -43,6 +43,23 @@ def build_panda_model(lora_rank: int = 4):
     """
     import os
 
+    # Ensure PANDA_DIR is on sys.path and is FIRST — so PanDA's networks/
+    # directory is found before DAP's (which also has a 'networks/' package).
+    if PANDA_DIR.exists():
+        panda_str = str(PANDA_DIR)
+        # Remove first, then prepend, so it's always first priority
+        if panda_str in sys.path:
+            sys.path.remove(panda_str)
+        sys.path.insert(0, panda_str)
+
+    # Evict any 'networks.*' entries that DAP may have cached in sys.modules.
+    # DAP's networks/dap.py is incompatible with PanDA's networks/panda.py —
+    # Python won't re-search sys.path for a module already in sys.modules,
+    # so we must clear the stale cache before re-importing.
+    for key in list(sys.modules.keys()):
+        if key == 'networks' or key.startswith('networks.'):
+            del sys.modules[key]
+
     # Save original working directory
     original_cwd = os.getcwd()
 
