@@ -267,7 +267,11 @@ class SPAG4D:
             
             # Ensure model is loaded (no-op if already loaded)
             if self.sharp_refiner is not None:
-                self.sharp_refiner.load_model()
+                try:
+                    self.sharp_refiner.load_model()
+                except (ImportError, Exception) as e:
+                    print(f"SHARP model unavailable ({e}), skipping refinement")
+                    use_sharp = False
             else:
                 use_sharp = False
         

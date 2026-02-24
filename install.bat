@@ -63,6 +63,7 @@ echo [2/4] Installing SPAG-4D Core Requirements...
 
 echo.
 echo [3/4] Installing Optional SHARP Model...
+!PIP! install timm pillow-heif
 !PIP! install --no-deps https://github.com/apple/ml-sharp/archive/refs/heads/main.zip
 
 echo.
@@ -71,7 +72,7 @@ echo [4/5] Installing Optional Depth Anything V3 Model...
 !PIP! install --no-deps --no-build-isolation https://github.com/ByteDance-Seed/depth-anything-3/archive/refs/heads/main.zip
 
 echo.
-echo [5/5] Installing Optional DAP Model...
+echo [5/6] Installing Optional DAP Model...
 !PIP! install einops opencv-python
 if not exist "spag4d\dap_arch\DAP\networks" (
     echo Initializing DAP submodule...
@@ -80,6 +81,15 @@ if not exist "spag4d\dap_arch\DAP\networks" (
         echo Git submodule failed. Cloning DAP manually...
         git clone https://github.com/Insta360-Research-Team/DAP spag4d\dap_arch\DAP
     )
+)
+
+echo.
+echo [6/6] Installing Optional PanDA Model...
+if not exist "spag4d\panda_arch\PanDA\networks" (
+    echo Cloning PanDA model architecture...
+    git clone https://github.com/caozidong/PanDA spag4d\panda_arch\PanDA
+) else (
+    echo PanDA already installed.
 )
 echo ==================================================
 echo   Installation Complete!

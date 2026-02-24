@@ -244,11 +244,10 @@ async def convert_panorama(
             )
             print(f"Switched to depth model: {depth_model}")
         except Exception as e:
-            # Clean up the pending job so it doesn't get stuck in the queue
-            del jobs[job_id]
             print(f"Failed to switch depth model to {depth_model}: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-    
+            print(f"Falling back to current model: {processor.depth_model_name}")
+            depth_model = processor.depth_model_name
+
     # Determine file extension
     suffix = Path(file.filename).suffix if file.filename else '.jpg'
     
@@ -320,11 +319,10 @@ async def convert_video(
             )
             print(f"Switched to depth model: {depth_model}")
         except Exception as e:
-            # Clean up the pending job so it doesn't get stuck in the queue
-            del jobs[job_id]
             print(f"Failed to switch depth model to {depth_model}: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-            
+            print(f"Falling back to current model: {processor.depth_model_name}")
+            depth_model = processor.depth_model_name
+
     # Save input video
     suffix = Path(file.filename).suffix if file.filename else '.mp4'
     job.input_path = TEMP_DIR / f"{job_id}_input{suffix}"
