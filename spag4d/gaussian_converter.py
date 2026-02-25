@@ -567,21 +567,18 @@ def generate_sky_dome(
     # Place sky Gaussians at fixed distance along the ray direction
     means = dome_distance * grid.rhat
     
-    # Compute scales: large Gaussians that overlap to form continuous backdrop
-    delta_theta = 2 * math.pi / W
+    # Compute scales: large isotropic spheres that overlap to form continuous backdrop
     delta_phi = math.pi / H
-    sin_phi = torch.sin(grid.phi).clamp(min=0.01)
     
-    # Effective stride for sky = grid stride × dome_stride
+    # Effective stride for sky = grid stride * dome_stride
     effective_stride = stride * dome_stride
     
-    s_azimuth = dome_scale * dome_distance * sin_phi * delta_theta * effective_stride
-    s_elevation = torch.full_like(s_azimuth, dome_scale * dome_distance * delta_phi * effective_stride)
-    s_normal = torch.minimum(s_azimuth, s_elevation) * 0.01  # Very thin — flat billboard
+    # Use delta_phi (elevation angular step) which is constant, unlike delta_theta * sin(phi)
+    # This prevents them from becoming tiny slivers at the poles and causing spiral dot patterns.
+    s_radius = torch.full([means.shape[0], means.shape[1]], dome_scale * dome_distance * delta_phi * effective_stride, device=device)
+    scales = torch.stack([s_radius, s_radius, s_radius], dim=-1)
     
-    scales = torch.stack([s_azimuth, s_elevation, s_normal], dim=-1)
-    
-    # Quaternions: reuse grid's tangent frame
+    # Quaternions: isotropic spheres don't need specific orientation, but we keep the grid's normal for consistency
     normal = -grid.rhat
     right = grid.tangent_right
     up = grid.tangent_up
