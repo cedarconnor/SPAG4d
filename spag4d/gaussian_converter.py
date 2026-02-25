@@ -333,6 +333,11 @@ def equirect_to_gaussians(
     s_azimuth   = scale_factor * depth * sin_phi * delta_theta * stride * detail_factor
     s_elevation = scale_factor * depth * delta_phi * stride * detail_factor
 
+    # Prevent azimuthal scale from collapsing to zero near the poles.
+    # If horizontal scale gets too much smaller than vertical, the Gaussians
+    # turn into thin slits and form moiré/dot patterns when viewed off-axis.
+    s_azimuth = torch.maximum(s_azimuth, s_elevation * 0.5)
+
     # s_normal: thin in radial direction
     s_normal = torch.minimum(s_azimuth, s_elevation) * thickness_ratio
 
