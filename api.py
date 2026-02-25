@@ -211,6 +211,8 @@ async def convert_panorama(
     # Phase 1: Cubemap SHARP Depth fusion
     sharp_depth_fuse: bool = Query(False),
     face_size: int = Query(1536, ge=128, le=1536),
+    # Phase 6: Post-conversion Outlier Pruning
+    outlier_pruning: float = Query(0.0, ge=0.0, le=1.0),
 ):
     """
     Convert uploaded panorama to Gaussian splat.
@@ -255,6 +257,7 @@ async def convert_panorama(
         "blend_levels": blend_levels,
         "sharp_depth_fuse": sharp_depth_fuse,
         "face_size": face_size,
+        "outlier_pruning": outlier_pruning,
     }
     
     # Re-initialize processor if depth model changed
@@ -297,6 +300,7 @@ async def convert_panorama(
         edge_refine=edge_refine,
         blend_mode=blend_mode, blend_levels=blend_levels,
         sharp_depth_fuse=sharp_depth_fuse, face_size=face_size,
+        outlier_pruning=outlier_pruning,
     ))
     
     return JSONResponse({
@@ -328,6 +332,7 @@ async def convert_video(
     sky_dome: bool = Query(True),
     depth_model: str = Query("panda"),
     da3_projection: str = Query("equirectangular"),
+    outlier_pruning: float = Query(0.0, ge=0.0, le=1.0),
 ):
     """Convert uploaded 360 video to sequence of Gaussian splats."""
     content = await file.read()
@@ -367,7 +372,8 @@ async def convert_video(
         job, fps, stride, scale_factor, thickness, global_scale, depth_min, depth_max,
         sky_threshold,
         start_time, duration, temporal_alpha, stabilize_video, scale_blend, opacity_blend,
-        sharp_depth_fuse, sharp_cubemap_size, color_blend, da3_projection=da3_projection
+        sharp_depth_fuse, sharp_cubemap_size, color_blend, da3_projection=da3_projection,
+        outlier_pruning=outlier_pruning
     ))
     
     return JSONResponse({
@@ -405,6 +411,7 @@ async def process_job(
     blend_levels: int = 5,
     sharp_depth_fuse: bool = False,
     face_size: int = 1536,
+    outlier_pruning: float = 0.0,
 ):
     """Process conversion job with GPU semaphore."""
     global processor
@@ -467,6 +474,7 @@ async def process_job(
                 blend_levels=blend_levels,
                 sharp_depth_fuse=sharp_depth_fuse,
                 face_size=face_size,
+                outlier_pruning=outlier_pruning,
             )
             
             # Generate web preview (low-res SPLAT)
@@ -535,6 +543,7 @@ async def process_video_job(
     sharp_cubemap_size: int = 1536,
     color_blend: float = 0.5,
     da3_projection: str = "equirectangular",
+    outlier_pruning: float = 0.0,
 ):
     """Process video conversion with batched inference, temporal smoothing, and stabilization."""
     global processor
@@ -563,7 +572,8 @@ async def process_video_job(
             frames_dir.mkdir(exist_ok=True)
             
             # Run ffmpeg to extract frames
-            cmd = ['ffmpeg']
+            import imageio_ffmpeg
+            cmd = [imageio_ffmpeg.get_ffmpeg_exe()]
             if start_time > 0:
                 cmd.extend(['-ss', str(start_time)])
             if duration:
@@ -754,6 +764,14 @@ async def process_video_job(
                         depth_max=depth_max,
                         validity_mask=validity_mask,
                     )
+
+                if outlier_pruning > 0.0 and gaussians['means'].shape[0] > 0:
+                    try:
+                        from spag4d.scene_filter import prune_outliers
+                        gaussians = prune_outliers(gaussians, strength=outlier_pruning)
+                    except Exception as e:
+                        import warnings
+                        warnings.warn(f"Outlier pruning failed on frame {i}: {e}")
 
                 # Apply stabilization if enabled
                 if vo is not None:

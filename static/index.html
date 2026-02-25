@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SPAG-4D | 360° to Gaussian Splat</title>
     <meta name="description" content="Convert 360° equirectangular panoramas to 3D Gaussian Splat files">
-    <link rel="stylesheet" href="css/style.css?v=2">
+    <link rel="stylesheet" href="css/style.css?v=3">
     <script src="js/three.min.js"></script>
 </head>
 
@@ -225,197 +225,235 @@
 
                 </div>
 
-                <!-- Parameters -->
-                <div class="params-row">
-                    <div class="param-group"
-                        title="Downsampling factor. &#10;1 (Max): Every pixel. &#10;8 (Fast): Every 8th pixel.">
-                        <label for="stride">Stride</label>
-                        <select id="stride">
-                            <option value="1" selected>1 (Max)</option>
-                            <option value="2">2</option>
-                            <option value="4">4</option>
-                            <option value="8">8 (Fast)</option>
-                        </select>
+                <!-- Tab Navigation -->
+                <div class="tabs-container">
+                    <div class="tabs-header">
+                        <button class="tab-btn active" data-tab="tab-basic">Basic</button>
+                        <button class="tab-btn" data-tab="tab-geometry">Geometry</button>
+                        <button class="tab-btn" data-tab="tab-sky">Environment</button>
+                        <button class="tab-btn" data-tab="tab-quality">Quality</button>
+                        <button class="tab-btn" data-tab="tab-video" id="video-tab-btn"
+                            style="display: none;">Video</button>
                     </div>
 
-                    <div class="param-group"
-                        title="Size multiplier for each splat. &#10;Increase to fill holes. &#10;Decrease for sharper details.">
-                        <label for="scale-factor">Scale</label>
-                        <input type="number" id="scale-factor" value="1.5" min="0.5" max="3" step="0.1">
-                    </div>
+                    <!-- Tab Contents -->
+                    <div class="tab-content active" id="tab-basic">
+                        <div class="params-row">
+                            <div class="param-group"
+                                title="Depth estimation model. &#10;PanDA (CVPR 2025): Better edges, robust 360°. &#10;DA3: General purpose model. &#10;DAP (Legacy): Original model.">
+                                <label for="depth-model">Depth Model</label>
+                                <select id="depth-model">
+                                    <option value="panda" selected>PanDA</option>
+                                    <option value="da3">DA3</option>
+                                    <option value="dap">DAP (Legacy)</option>
+                                </select>
+                            </div>
 
-                    <div class="param-group"
-                        title="Thickness ratio of splats. &#10;Lower values make flat disks. &#10;Higher values make spheres.">
-                        <label for="thickness">Thickness</label>
-                        <input type="number" id="thickness" value="0.1" min="0.01" max="0.5" step="0.01">
-                    </div>
-
-                    <div class="param-group"
-                        title="Global depth multiplier. &#10;Adjust if the world scale feels too large or small.">
-                        <label for="global-scale">Depth Scale</label>
-                        <input type="number" id="global-scale" value="1.0" min="0.1" max="10" step="0.1">
-                    </div>
-
-                    <div class="param-group range-group"
-                        title="Valid depth range in meters. &#10;Points outside this range are clipped.">
-                        <label>Depth Range (m)</label>
-                        <div class="range-inputs">
-                            <input type="number" id="depth-min" value="0.1" min="0.01" max="10" step="0.1"
-                                title="Minimum depth">
-                            <span>–</span>
-                            <input type="number" id="depth-max" value="100" min="10" max="1000" step="10"
-                                title="Maximum depth">
+                            <div class="param-group" id="da3-projection-group"
+                                style="display: none; border-left: 1px solid #444; padding-left: 10px; margin-left: 5px;"
+                                title="Projection mode for DA3 depth extraction. &#10;Equirectangular is default. Cubemap/Icosahedron stitch faces for higher resolution but may have seams.">
+                                <label for="da3-projection">DA3 Proj</label>
+                                <select id="da3-projection" style="width: 100px;">
+                                    <option value="equirectangular" selected>Equirectangular</option>
+                                    <option value="cubemap">Cube Map</option>
+                                    <option value="icosahedral">Icosahedron</option>
+                                </select>
+                            </div>
                         </div>
                     </div>
 
-                    <div class="param-group"
-                        title="Depth estimation model. &#10;PanDA (CVPR 2025): Better edges, robust 360°. &#10;DA3: General purpose model. &#10;DAP (Legacy): Original model.">
-                        <label for="depth-model">Depth Model</label>
-                        <select id="depth-model">
-                            <option value="panda" selected>PanDA</option>
-                            <option value="da3">DA3</option>
-                            <option value="dap">DAP (Legacy)</option>
-                        </select>
+                    <div class="tab-content" id="tab-geometry">
+                        <div class="params-row">
+                            <div class="param-group"
+                                title="Downsampling factor. &#10;1 (Max): Every pixel. &#10;8 (Fast): Every 8th pixel.">
+                                <label for="stride">Stride</label>
+                                <select id="stride">
+                                    <option value="1" selected>1 (Max)</option>
+                                    <option value="2">2</option>
+                                    <option value="4">4</option>
+                                    <option value="8">8 (Fast)</option>
+                                </select>
+                            </div>
+
+                            <div class="param-group"
+                                title="Size multiplier for each splat. &#10;Increase to fill holes. &#10;Decrease for sharper details.">
+                                <label for="scale-factor">Scale</label>
+                                <input type="number" id="scale-factor" value="1.5" min="0.5" max="3" step="0.1">
+                            </div>
+
+                            <div class="param-group"
+                                title="Thickness ratio of splats. &#10;Lower values make flat disks. &#10;Higher values make spheres.">
+                                <label for="thickness">Thickness</label>
+                                <input type="number" id="thickness" value="0.1" min="0.01" max="0.5" step="0.01">
+                            </div>
+
+                            <div class="param-group"
+                                title="Global depth multiplier. &#10;Adjust if the world scale feels too large or small.">
+                                <label for="global-scale">Depth Scale</label>
+                                <input type="number" id="global-scale" value="1.0" min="0.1" max="10" step="0.1">
+                            </div>
+
+                            <div class="param-group range-group"
+                                title="Valid depth range in meters. &#10;Points outside this range are clipped.">
+                                <label>Depth Range (m)</label>
+                                <div class="range-inputs">
+                                    <input type="number" id="depth-min" value="0.1" min="0.01" max="10" step="0.1"
+                                        title="Minimum depth">
+                                    <span>–</span>
+                                    <input type="number" id="depth-max" value="100" min="10" max="1000" step="10"
+                                        title="Maximum depth">
+                                </div>
+                            </div>
+                        </div>
                     </div>
 
-                    <div class="param-group" id="da3-projection-group"
-                        style="display: none; border-left: 1px solid #444; padding-left: 10px; margin-left: 5px;"
-                        title="Projection mode for DA3 depth extraction. &#10;Equirectangular is default. Cubemap/Icosahedron stitch faces for higher resolution but may have seams.">
-                        <label for="da3-projection">DA3 Proj</label>
-                        <select id="da3-projection" style="width: 100px;">
-                            <option value="equirectangular" selected>Equirectangular</option>
-                            <option value="cubemap">Cube Map</option>
-                            <option value="icosahedral">Icosahedron</option>
-                        </select>
+                    <div class="tab-content" id="tab-sky">
+                        <div class="params-row">
+                            <div class="param-group"
+                                title="Distance in meters beyond which points are removed. &#10;Use to cut out sky artifacts in open scenes.">
+                                <label for="sky-threshold">Sky Cutoff (m)</label>
+                                <input type="number" id="sky-threshold" value="80" min="0" max="1000" step="10">
+                            </div>
+
+                            <div class="param-group"
+                                title="Generate a distant sky backdrop instead of clipping sky pixels.">
+                                <label for="sky-dome">Sky Dome</label>
+                                <input type="checkbox" id="sky-dome" checked style="width: 18px; height: 18px;">
+                            </div>
+                        </div>
                     </div>
 
-                    <div class="param-group"
-                        title="RGB-guided depth edge sharpening. &#10;Uses panorama colors to sharpen blurry depth boundaries.">
-                        <label for="guided-filter">Edge Refine</label>
-                        <input type="checkbox" id="guided-filter" checked style="width: 18px; height: 18px;">
+                    <div class="tab-content" id="tab-quality">
+                        <div class="params-row">
+                            <div class="param-group"
+                                title="RGB-guided depth edge sharpening. &#10;Uses panorama colors to sharpen blurry depth boundaries.">
+                                <label for="guided-filter">Edge Refine</label>
+                                <input type="checkbox" id="guided-filter" checked style="width: 18px; height: 18px;">
+                            </div>
+
+                            <div class="param-group" id="guided-strength-group"
+                                style="border-left: 1px solid #444; padding-left: 10px; margin-left: 5px;">
+                                <label for="guided-strength">Refine Strength</label>
+                                <input type="range" id="guided-strength" min="0" max="1" step="0.05" value="0.25"
+                                    title="Blend factor for edge refinement (0=Original Depth, 1=Fully Refined)">
+                            </div>
+
+                            <div class="param-group"
+                                style="border-left: 1px solid #444; padding-left: 10px; margin-left: 5px;"
+                                title="Use ML-Sharp on 6 perspective cubemap faces to extract high-frequency structural detail scaling against DAP global geometry.">
+                                <label for="sharp-depth-fuse">Sharp Depth Fuse</label>
+                                <input type="checkbox" id="sharp-depth-fuse" style="width: 18px; height: 18px;">
+                            </div>
+
+                            <div class="param-group"
+                                title="Statistical outlier removal to clean up isolated floaters. &#10;0 = Off, 1.0 = Aggressive pruning.">
+                                <label for="outlier-pruning">Floaters Cleanup</label>
+                                <input type="range" id="outlier-pruning" min="0" max="1" step="0.1" value="0.0"
+                                    style="width: 80px;" title="Removes noise points based on density">
+                            </div>
+
+                            <!-- SHARP Params -->
+                            <div class="param-group"
+                                style="border-left: 1px solid #444; padding-left: 10px; margin-left: 5px;"
+                                title="Perceptual refinement using ML-SHARP. Requires download (~3GB).">
+                                <label for="sharp-refine">Magic Fix (SHARP)</label>
+                                <input type="checkbox" id="sharp-refine" checked style="width: 18px; height: 18px;">
+                            </div>
+
+                            <div class="param-group" id="sharp-blend-group" style="display: none; opacity: 0.5;">
+                                <label for="scale-blend">Detail Blend</label>
+                                <input type="range" id="scale-blend" min="0" max="1" step="0.1" value="0.8"
+                                    title="Blend geometric vs learned scales (0=Geo, 1=Learned)">
+                            </div>
+
+                            <div class="param-group" id="sharp-opacity-group" style="display: none; opacity: 0.5;">
+                                <label for="opacity-blend">Opacity Blend</label>
+                                <input type="range" id="opacity-blend" min="0" max="1" step="0.1" value="1.0"
+                                    title="Blend geometric vs learned opacity (0=Geo, 1=Learned)">
+                            </div>
+
+                            <div class="param-group" id="sharp-color-group" style="display: none; opacity: 0.5;">
+                                <label for="color-blend">Color Blend</label>
+                                <input type="range" id="color-blend" min="0" max="1" step="0.1" value="0.5"
+                                    title="Blend source vs SHARP colors (0=Source, 1=SHARP)">
+                            </div>
+
+                            <div class="param-group" id="sharp-projection-group" style="display: none; opacity: 0.5;"
+                                title="Projection mode. Cubemap (6 faces, fast) or Icosahedral (20 faces, better quality).">
+                                <label for="sharp-projection">Proj</label>
+                                <select id="sharp-projection" style="width: 85px;">
+                                    <option value="cubemap" selected>Cube (6)</option>
+                                    <option value="icosahedral">Icosa (20)</option>
+                                </select>
+                            </div>
+
+                            <div class="param-group" id="sharp-resolution-group" style="display: none; opacity: 0.5;"
+                                title="SHARP processing resolution. &#10;Higher = better quality but uses more VRAM and time. &#10;1536 is default. &#10;2304+ for large, detail-rich scenes.">
+                                <label for="sharp-cubemap-size">Res</label>
+                                <select id="sharp-cubemap-size" style="width: 85px;">
+                                    <option value="768">768 (Fast)</option>
+                                    <option value="1536" selected>1536 (Def)</option>
+                                    <option value="1920">1920 (High)</option>
+                                    <option value="2304">2304 (Ultra)</option>
+                                    <option value="3072">3072 (Max)</option>
+                                </select>
+                            </div>
+                        </div>
                     </div>
 
-                    <div class="param-group"
-                        title="Use ML-Sharp on 6 perspective cubemap faces to extract high-frequency structural detail scaling against DAP global geometry.">
-                        <label for="sharp-depth-fuse">Sharp Depth Fuse</label>
-                        <input type="checkbox" id="sharp-depth-fuse" style="width: 18px; height: 18px;">
+                    <div class="tab-content" id="tab-video">
+                        <div class="params-row" id="video-params">
+                            <div class="param-group"
+                                title="Frames Per Second to extract. Higher = smoother but slower.">
+                                <label for="fps">FPS</label>
+                                <input type="number" id="fps" value="10" min="1" max="60" step="1">
+                            </div>
+                            <div class="param-group" title="Start time in seconds">
+                                <label for="video-start">Start (s)</label>
+                                <input type="number" id="video-start" value="0.0" min="0" step="0.1"
+                                    style="width: 60px;">
+                            </div>
+                            <div class="param-group" title="Duration in seconds. Leave empty for full video.">
+                                <label for="video-duration">Duration (s)</label>
+                                <input type="number" id="video-duration" value="" min="0.1" step="0.1" placeholder="All"
+                                    style="width: 60px;">
+                            </div>
+                            <div class="param-group"
+                                title="Temporal smoothing strength. 0 = off, higher = smoother (may cause ghosting).">
+                                <label for="temporal-alpha">Smoothing</label>
+                                <input type="range" id="temporal-alpha" value="0.3" min="0" max="0.8" step="0.1"
+                                    style="width: 60px;">
+                            </div>
+                            <div class="param-group" title="Stabilize camera rotation using visual odometry.">
+                                <label for="stabilize-video">Stabilize</label>
+                                <input type="checkbox" id="stabilize-video" style="width: 18px; height: 18px;">
+                            </div>
+                            <div class="param-group" style="flex: 1; align-items: flex-start; justify-content: center;">
+                                <span class="panel-hint">Video Mode: 4D Output</span>
+                            </div>
+                        </div>
+                        <div class="params-row" id="video-info" style="padding-top: 10px; min-height: 0;">
+                            <div class="param-group"
+                                style="width: 100%; text-align: center; color: #aaa; font-size: 0.85em;">
+                                <span id="video-metadata">Detected: -</span>
+                            </div>
+                        </div>
                     </div>
-
-                    <div class="param-group" id="guided-strength-group"
-                        style="border-left: 1px solid #444; padding-left: 10px; margin-left: 5px;">
-                        <label for="guided-strength">Refine Strength</label>
-                        <input type="range" id="guided-strength" min="0" max="1" step="0.05" value="0.25"
-                            title="Blend factor for edge refinement (0=Original Depth, 1=Fully Refined)">
-                    </div>
-
-                    <div class="param-group"
-                        title="Distance in meters beyond which points are removed. &#10;Use to cut out sky artifacts in open scenes.">
-                        <label for="sky-threshold">Sky Cutoff (m)</label>
-                        <input type="number" id="sky-threshold" value="80" min="0" max="1000" step="10">
-                    </div>
-
-                    <div class="param-group" title="Generate a distant sky backdrop instead of clipping sky pixels.">
-                        <label for="sky-dome">Sky Dome</label>
-                        <input type="checkbox" id="sky-dome" checked style="width: 18px; height: 18px;">
-                    </div>
-
-                    <!-- SHARP Params -->
-                    <div class="param-group" style="border-left: 1px solid #444; padding-left: 10px; margin-left: 5px;"
-                        title="Perceptual refinement using ML-SHARP. Requires download (~3GB).">
-                        <label for="sharp-refine">Magic Fix (SHARP)</label>
-                        <input type="checkbox" id="sharp-refine" checked style="width: 18px; height: 18px;">
-                    </div>
-
-                    <div class="param-group" id="sharp-blend-group" style="display: none; opacity: 0.5;">
-                        <label for="scale-blend">Detail Blend</label>
-                        <input type="range" id="scale-blend" min="0" max="1" step="0.1" value="0.8"
-                            title="Blend geometric vs learned scales (0=Geo, 1=Learned)">
-                    </div>
-
-                    <div class="param-group" id="sharp-opacity-group" style="display: none; opacity: 0.5;">
-                        <label for="opacity-blend">Opacity Blend</label>
-                        <input type="range" id="opacity-blend" min="0" max="1" step="0.1" value="1.0"
-                            title="Blend geometric vs learned opacity (0=Geo, 1=Learned)">
-                    </div>
-
-                    <div class="param-group" id="sharp-color-group" style="display: none; opacity: 0.5;">
-                        <label for="color-blend">Color Blend</label>
-                        <input type="range" id="color-blend" min="0" max="1" step="0.1" value="0.5"
-                            title="Blend source vs SHARP colors (0=Source, 1=SHARP)">
-                    </div>
-
-                    <div class="param-group" id="sharp-projection-group" style="display: none; opacity: 0.5;"
-                        title="Projection mode. Cubemap (6 faces, fast) or Icosahedral (20 faces, better quality).">
-                        <label for="sharp-projection">Proj</label>
-                        <select id="sharp-projection" style="width: 85px;">
-                            <option value="cubemap" selected>Cube (6)</option>
-                            <option value="icosahedral">Icosa (20)</option>
-                        </select>
-                    </div>
-                </div>
-
-                <div class="param-group" id="sharp-resolution-group" style="display: none; opacity: 0.5;"
-                    title="SHARP processing resolution. &#10;Higher = better quality but uses more VRAM and time. &#10;1536 is default.">
-                    <label for="sharp-cubemap-size">Res</label>
-                    <select id="sharp-cubemap-size" style="width: 85px;">
-                        <option value="768">768 (Fast)</option>
-                        <option value="1536" selected>1536 (Def)</option>
-                        <option value="1920">1920 (High)</option>
-                        <option value="2304">2304 (Ultra)</option>
-                        <option value="3072">3072 (Max)</option>
-                    </select>
                 </div>
             </div>
 
-            <!-- Video Parameters (Hidden by default) -->
-            <div class="params-row" id="video-params"
-                style="display: none; margin-top: 10px; border-top: 1px solid #333; padding-top: 10px;">
-                <div class="param-group" title="Frames Per Second to extract. Higher = smoother but slower.">
-                    <label for="fps">FPS</label>
-                    <input type="number" id="fps" value="10" min="1" max="60" step="1">
+            <!-- Status Bar -->
+            <div class="status-bar">
+                <div class="status-left">
+                    <span id="status-text" class="status-text">Ready</span>
+                    <span id="progress-text" class="progress-text"></span>
                 </div>
-                <div class="param-group" title="Start time in seconds">
-                    <label for="video-start">Start (s)</label>
-                    <input type="number" id="video-start" value="0.0" min="0" step="0.1" style="width: 60px;">
-                </div>
-                <div class="param-group" title="Duration in seconds. Leave empty for full video.">
-                    <label for="video-duration">Duration (s)</label>
-                    <input type="number" id="video-duration" value="" min="0.1" step="0.1" placeholder="All"
-                        style="width: 60px;">
-                </div>
-                <div class="param-group"
-                    title="Temporal smoothing strength. 0 = off, higher = smoother (may cause ghosting).">
-                    <label for="temporal-alpha">Smoothing</label>
-                    <input type="range" id="temporal-alpha" value="0.3" min="0" max="0.8" step="0.1"
-                        style="width: 60px;">
-                </div>
-                <div class="param-group" title="Stabilize camera rotation using visual odometry.">
-                    <label for="stabilize-video">Stabilize</label>
-                    <input type="checkbox" id="stabilize-video" style="width: 18px; height: 18px;">
-                </div>
-                <div class="param-group" style="flex: 1; align-items: flex-start; justify-content: center;">
-                    <span class="panel-hint">Video Mode: 4D Output</span>
+                <div class="status-right">
+                    <span id="gpu-status" class="gpu-status">●</span>
+                    <span>GPU</span>
                 </div>
             </div>
-            <div class="params-row" id="video-info" style="display: none; padding-top: 0; min-height: 0;">
-                <div class="param-group" style="width: 100%; text-align: center; color: #aaa; font-size: 0.85em;">
-                    <span id="video-metadata">Detected: -</span>
-                </div>
-            </div>
-    </div>
-
-    <!-- Status Bar -->
-    <div class="status-bar">
-        <div class="status-left">
-            <span id="status-text" class="status-text">Ready</span>
-            <span id="progress-text" class="progress-text"></span>
-        </div>
-        <div class="status-right">
-            <span id="gpu-status" class="gpu-status">●</span>
-            <span>GPU</span>
-        </div>
-    </div>
-    </main>
+        </main>
     </div>
 
     <script src="js/pano-viewer.js?v=2"></script>

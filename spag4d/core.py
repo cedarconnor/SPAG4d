@@ -512,6 +512,18 @@ class SPAG4D:
         if sh_degree == 0 and 'sh1' in gaussians:
             sh_degree = 1
 
+        # ─────────────────────────────────────────────────────────────────
+        # Phase 6: Post-conversion Outlier Pruning (Floaters cleanup)
+        # ─────────────────────────────────────────────────────────────────
+        outlier_pruning = kwargs.get('outlier_pruning', 0.0)
+        if outlier_pruning > 0.0 and gaussians['means'].shape[0] > 0:
+            try:
+                from .scene_filter import prune_outliers
+                gaussians = prune_outliers(gaussians, strength=outlier_pruning)
+            except Exception as e:
+                import warnings
+                warnings.warn(f"Outlier pruning failed: {e}")
+
         # Save output
         output_path = Path(output_path)
         if output_format == "splat":

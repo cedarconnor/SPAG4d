@@ -106,3 +106,6 @@ test_out.txt
 test_panorama_8k.png
 test_panda_tiles.ply
 QUALITY_IMPROVEMENTS.md
+SPAG4D_Quality_Architecture.md
+implementation_plan.md
+pytest_output.txt

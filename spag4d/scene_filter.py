@@ -364,3 +364,68 @@ def apply_sky_mode_to_gaussians(
             combined[key] = gaussians[key]
 
     return combined
+
+def prune_outliers(
+    gaussians: dict,
+    strength: float = 0.5,
+    k: int = 16,
+) -> dict:
+    """
+    Remove isolated Gaussians (floaters) using Statistical Outlier Removal (SOR).
+    
+    Args:
+        gaussians: Dict of Gaussian tensors (means, scales, opacities, colors, quats, sh1)
+        strength: Rejection strength from 0.0 to 1.0 (higher = more aggressive pruning)
+        k: Number of nearest neighbors to consider
+        
+    Returns:
+        Pruned gaussians dict
+    """
+    if strength <= 0.0 or gaussians['means'].shape[0] < k + 1:
+        return gaussians
+        
+    import numpy as np
+    try:
+        from scipy.spatial import cKDTree
+    except ImportError:
+        import warnings
+        warnings.warn("scipy not installed. Skipping outlier pruning.")
+        return gaussians
+
+    means_np = gaussians['means'].detach().cpu().numpy()
+    tree = cKDTree(means_np)
+    
+    # Query distances to k nearest neighbors (k+1 because the point itself is included at dist=0)
+    # n_jobs=-1 uses all CPU cores
+    distances, _ = tree.query(means_np, k=k + 1, workers=-1)
+    
+    # Average distance to neighbors (excluding the point itself)
+    avg_distances = np.mean(distances[:, 1:], axis=1)
+    
+    # Compute global mean and std
+    global_mean = np.mean(avg_distances)
+    global_std = np.std(avg_distances)
+    
+    # Mapping strength (0.0 - 1.0) to std_ratio (3.0 to 0.5)
+    # std_ratio defines how many standard deviations away from the mean is acceptable.
+    # lower std_ratio = more aggressive pruning.
+    # strength=0.0 -> std_ratio=3.0 (mild)
+    # strength=1.0 -> std_ratio=0.5 (aggressive)
+    std_ratio = 3.0 - (strength * 2.5) 
+    
+    threshold = global_mean + (global_std * std_ratio)
+    
+    # Keep points whose average distance is below the threshold
+    keep_mask_np = avg_distances < threshold
+    
+    import torch
+    keep_mask = torch.from_numpy(keep_mask_np).to(gaussians['means'].device)
+    
+    pruned = {}
+    for key, tensor in gaussians.items():
+        pruned[key] = tensor[keep_mask]
+        
+    removed_count = len(means_np) - int(keep_mask_np.sum())
+    print(f"[Outlier Pruning] Removed {removed_count:,} floaters (strength={strength:.2f})")
+    
+    return pruned

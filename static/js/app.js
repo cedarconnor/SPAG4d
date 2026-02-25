@@ -64,6 +64,7 @@ class SPAG4DApp {
         this.guidedStrengthInput = document.getElementById('guided-strength');
         this.guidedStrengthGroup = document.getElementById('guided-strength-group');
         this.sharpDepthFuseInput = document.getElementById('sharp-depth-fuse');
+        this.outlierPruningInput = document.getElementById('outlier-pruning');
 
         // DA3 specific elements
         this.da3ProjectionInput = document.getElementById('da3-projection');
@@ -198,6 +199,9 @@ class SPAG4DApp {
             tabDepth.addEventListener('click', () => this.switchTab('depth'));
         }
 
+        // Parameter Tabs
+        this.setupParamTabs();
+
         // Quality selector
         const qualitySelect = document.getElementById('splat-quality');
         if (qualitySelect) {
@@ -219,6 +223,27 @@ class SPAG4DApp {
                 }
             });
         }
+    }
+
+    setupParamTabs() {
+        const tabBtns = document.querySelectorAll('.tabs-header .tab-btn');
+        const tabContents = document.querySelectorAll('.tab-content');
+
+        tabBtns.forEach(btn => {
+            btn.addEventListener('click', () => {
+                // Remove active class from all buttons and contents
+                tabBtns.forEach(b => b.classList.remove('active'));
+                tabContents.forEach(c => c.classList.remove('active'));
+
+                // Add active class to clicked button and target content
+                btn.classList.add('active');
+                const targetId = btn.getAttribute('data-tab');
+                const targetContent = document.getElementById(targetId);
+                if (targetContent) {
+                    targetContent.classList.add('active');
+                }
+            });
+        });
     }
 
     handleQualityChange() {
@@ -304,21 +329,33 @@ class SPAG4DApp {
 
         // Check if video
         this.isVideo = file.type.startsWith('video/');
+        const videoTabBtn = document.getElementById('video-tab-btn');
+
         if (this.isVideo) {
             console.log('[App] Video detected');
-            this.videoParams.style.display = 'flex';
-            this.videoInfo.style.display = 'flex';
+            if (videoTabBtn) videoTabBtn.style.display = 'block';
+            if (this.videoInfo) this.videoInfo.style.display = 'flex';
             this.downloadSplatBtn.style.display = 'none';
             this.downloadPlyBtn.style.display = 'none';
             this.downloadZipBtn.style.display = 'flex';
             this.downloadZipBtn.disabled = true;
             this.extractVideoMetadata(file);
+
+            // Auto-switch to video tab
+            if (videoTabBtn) videoTabBtn.click();
         } else {
-            this.videoParams.style.display = 'none';
-            this.videoInfo.style.display = 'none';
+            console.log('[App] Image detected');
+            if (videoTabBtn) videoTabBtn.style.display = 'none';
+            if (this.videoInfo) this.videoInfo.style.display = 'none';
             this.downloadSplatBtn.style.display = 'flex';
             this.downloadPlyBtn.style.display = 'flex';
             this.downloadZipBtn.style.display = 'none';
+
+            // Auto-switch to basic tab if video tab was active
+            if (videoTabBtn && videoTabBtn.classList.contains('active')) {
+                const basicTabBtn = document.querySelector('.tabs-header .tab-btn[data-tab="tab-basic"]');
+                if (basicTabBtn) basicTabBtn.click();
+            }
         }
 
         // Load into 360 viewer
@@ -382,7 +419,8 @@ class SPAG4DApp {
             da3_projection: this.da3ProjectionInput ? this.da3ProjectionInput.value : 'equirectangular',
             guided_filter: this.guidedFilterInput ? this.guidedFilterInput.checked : true,
             guided_strength: this.guidedStrengthInput ? this.guidedStrengthInput.value : 0.25,
-            sharp_depth_fuse: this.sharpDepthFuseInput ? this.sharpDepthFuseInput.checked : false
+            sharp_depth_fuse: this.sharpDepthFuseInput ? this.sharpDepthFuseInput.checked : false,
+            outlier_pruning: this.outlierPruningInput ? this.outlierPruningInput.value : 0.0
         });
 
         try {
@@ -399,6 +437,7 @@ class SPAG4DApp {
                 params.append('sharp_cubemap_size', this.sharpCubemapSizeInput ? this.sharpCubemapSizeInput.value : 1536);
                 params.append('sky_threshold', this.skyThresholdInput ? this.skyThresholdInput.value : 80.0);
                 params.append('sharp_depth_fuse', this.sharpDepthFuseInput ? this.sharpDepthFuseInput.checked : false);
+                params.append('outlier_pruning', this.outlierPruningInput ? this.outlierPruningInput.value : 0.0);
                 if (this.videoDurationInput.value) {
                     params.append('duration', this.videoDurationInput.value);
                 }
