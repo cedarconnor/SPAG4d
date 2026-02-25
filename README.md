@@ -26,7 +26,8 @@ The result is a dense cloud of 3D Gaussians (tiny colored blobs) that reconstruc
 - **Edge Refine** -- RGB-guided filtering sharpens blurry depth edges using the panorama's own color detail
 - **Sky dome** -- Instead of clipping sky pixels, a backdrop sphere fills the sky so there's no black void when looking around
 - **Depth model choice** -- Switch between PanDA (default, 360°-tuned), DA3 (latest general-purpose), and DAP (legacy)
-- **DA3 Projections** -- Extract DA3 depth via Cube Map or Icosahedron projection, intelligently normalized and stitched.
+- **DA3 Hybrid Projections** -- Extract DA3 depth via Cube Map or Icosahedron projection, anchored seamlessly against DAP's global `latlong` context to prevent distortion.
+- **SHARP Depth Fusion** -- Optionally use ML-Sharp's internal monodepth model on perspective faces to inject high-frequency detail into the base depth maps.
 - **Standard output** -- PLY files work with gsplat, SuperSplat, and any 3DGS viewer
 - **Compressed output** -- SPLAT format is ~8x smaller for sharing on the web
 - **Preloaded Test Image** -- Easily test the app instantly upon loading the UI
@@ -206,10 +207,13 @@ python -m spag4d.cli convert panorama.jpg output.ply --depth-model dap
 # Disable edge refinement (guided filter)
 python -m spag4d.cli convert panorama.jpg output.ply --no-guided-filter
 
-# Convert without SHARP (faster, lower quality)
+# Convert without SHARP refinement (faster, lower quality geometric-only splats)
 python -m spag4d.cli convert panorama.jpg output.ply --no-sharp-refine
 
-# Higher quality with icosahedral projection (20 faces instead of 6)
+# Inject maximum structural detail using SHARP Depth Fusion (runs ML-Sharp on cubemap boundaries)
+python -m spag4d.cli convert panorama.jpg output.ply --sharp-depth-fuse
+
+# Higher quality with icosahedral projection (20 faces instead of 6) for SHARP texturing
 python -m spag4d.cli convert panorama.jpg output.ply --sharp-projection icosahedral
 
 # Output as compressed SPLAT for web
@@ -280,7 +284,8 @@ converter_fast = SPAG4D(
 | `depth_min` | 0.1 | Ignore anything closer than this (meters) |
 | `depth_max` | 100.0 | Ignore anything farther than this (meters) |
 | `depth_model` | panda | `da3`, `panda`, or `dap` |
-| `da3_projection` | equirectangular | If using `da3`, process depth using `cubemap` or `icosahedral` patches |
+| `da3_projection` | equirectangular | If using `da3`, process depth using `cubemap` or `icosahedral` patches anchored with `dap` for scale. |
+| `sharp_depth_fuse` | False | Leverage ML-Sharp across structural faces to overlay high-definition depth |
 | `sky_threshold` | 80.0 | Remove points beyond this distance (cuts out sky artifacts) |
 | `sky_dome` | **True** | Generate a distant backdrop sphere from sky pixels instead of deleting them |
 | `format` | ply | Output format: `ply`, `splat`, or `both` |

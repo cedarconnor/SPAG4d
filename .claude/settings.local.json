@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd:2)",
+      "Bash(cd:*)",
+      "Bash(cd D:/SPAG-4D && python_embed/python.exe -c \"\nimport torch\nfrom spag4d.gaussian_converter import equirect_to_gaussians, _estimate_normals_torch\nfrom spag4d.spherical_grid import create_spherical_grid\n\ndevice = torch.device\\('cpu'\\)\nH, W, stride = 256, 512, 2\ngrid = create_spherical_grid\\(H, W, device, stride=stride\\)\n\ndepth = torch.full\\(\\(H//stride, W//stride\\), 5.0\\)\nnormals, conf = _estimate_normals_torch\\(depth, grid.phi, grid.theta\\)\nprint\\(f'normals shape: {normals.shape}'\\)\nprint\\(f'conf range: [{conf.min\\(\\):.3f}, {conf.max\\(\\):.3f}]'\\)\n\nimage = torch.randint\\(0, 255, \\(H, W, 3\\), dtype=torch.uint8\\)\ndepth_full = torch.full\\(\\(H, W\\), 5.0\\)\n\nout = equirect_to_gaussians\\(image, depth_full, grid, oriented_gaussians=True\\)\nprint\\(f'means: {out[\\\\\"means\\\\\"].shape}, scales: {out[\\\\\"scales\\\\\"].shape}, quats: {out[\\\\\"quats\\\\\"].shape}'\\)\nprint\\(f'opacities range: [{out[\\\\\"opacities\\\\\"].min\\(\\):.3f}, {out[\\\\\"opacities\\\\\"].max\\(\\):.3f}]'\\)\nprint\\('oriented_gaussians=True: OK'\\)\n\nout2 = equirect_to_gaussians\\(image, depth_full, grid, oriented_gaussians=False\\)\nprint\\(f'oriented_gaussians=False: OK, means={out2[\\\\\"means\\\\\"].shape}'\\)\n\" 2>&1)",
+      "Bash(cd D:/SPAG-4D && python_embed/python.exe -m pytest tests/ -v --tb=short 2>&1)",
+      "Bash(cd D:/SPAG-4D && python_embed/python.exe -m pytest tests/ -v --tb=short --ignore=tests/test_ui_full.py 2>&1)",
+      "Bash(cd D:/SPAG-4D && python_embed/python.exe -m pytest tests/test_gaussian_params.py -v --tb=short 2>&1)",
+      "Bash(cd D:/SPAG-4D && python_embed/python.exe -m pytest tests/ --ignore=tests/test_ui_full.py -q 2>&1)",
+      "Bash(cd /d/SPAG-4D && python_embed/python.exe -m pytest tests/test_scene_filter.py -v 2>&1)",
+      "Bash(cd /d/SPAG-4D && python_embed/python.exe -m pytest tests/ -v --ignore=tests/test_ui_full.py 2>&1)",
+      "Bash(cd /d/SPAG-4D && python_embed/python.exe -m pytest tests/test_adaptive_stride.py -v 2>&1)",
+      "Bash(cd /d/SPAG-4D && python_embed/python.exe -m pytest tests/ --ignore=tests/test_ui_full.py -q 2>&1)",
+      "Bash(python_embed\\\\python.exe:*)",
+      "Bash(cd /d/SPAG-4D && python_embed/python.exe -m pytest tests/test_depth_blend.py -v 2>&1)",
+      "Bash(tail:*)",
+      "Bash(cd /d/SPAG-4D && python_embed/python.exe -m pytest tests/test_depth_pro_fusion.py -v 2>&1)",
+      "Bash(find D:\\\\SPAG-4D\\\\ml-sharp:*)"
+    ]
+  }
+}

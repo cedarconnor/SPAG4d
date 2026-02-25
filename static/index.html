@@ -269,7 +269,7 @@
                     </div>
 
                     <div class="param-group"
-                        title="Depth estimation model. &#10;PanDA (CVPR 2025): Better edges, robust 360°. &#10;DAP (Legacy): Original model.">
+                        title="Depth estimation model. &#10;PanDA (CVPR 2025): Better edges, robust 360°. &#10;DA3: General purpose model. &#10;DAP (Legacy): Original model.">
                         <label for="depth-model">Depth Model</label>
                         <select id="depth-model">
                             <option value="panda" selected>PanDA</option>
@@ -293,6 +293,12 @@
                         title="RGB-guided depth edge sharpening. &#10;Uses panorama colors to sharpen blurry depth boundaries.">
                         <label for="guided-filter">Edge Refine</label>
                         <input type="checkbox" id="guided-filter" checked style="width: 18px; height: 18px;">
+                    </div>
+
+                    <div class="param-group"
+                        title="Use ML-Sharp on 6 perspective cubemap faces to extract high-frequency structural detail scaling against DAP global geometry.">
+                        <label for="sharp-depth-fuse">Sharp Depth Fuse</label>
+                        <input type="checkbox" id="sharp-depth-fuse" style="width: 18px; height: 18px;">
                     </div>
 
                     <div class="param-group" id="guided-strength-group"

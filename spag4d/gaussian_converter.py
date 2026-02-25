@@ -14,6 +14,90 @@ from typing import Optional
 from .spherical_grid import SphericalGrid, rotation_matrix_to_quaternion
 
 
+def _estimate_normals_torch(
+    depth: torch.Tensor,
+    phi: torch.Tensor,
+    theta: torch.Tensor,
+) -> tuple:
+    """
+    Estimate surface normals from ERP depth using central finite differences.
+
+    Converts depth to 3D positions, computes tangent vectors via finite
+    differences in the (phi, theta) angular directions, and returns their
+    cross product as the surface normal.  The horizontal direction uses
+    circular differences to handle the ERP wrap-around at the image seam.
+
+    Args:
+        depth: [H, W] depth in metres (at strided grid resolution)
+        phi:   [H, W] colatitude in radians [0, pi]   (from SphericalGrid)
+        theta: [H, W] azimuth    in radians [0, 2pi]  (from SphericalGrid)
+
+    Returns:
+        normals:    [H, W, 3] inward-pointing unit normals
+        confidence: [H, W] in [0, 1]; low at depth discontinuities
+    """
+    sin_phi   = torch.sin(phi)
+    cos_phi   = torch.cos(phi)
+    sin_theta = torch.sin(theta)
+    cos_theta = torch.cos(theta)
+
+    # 3D positions (Y-up frame, matching spherical_grid.py)
+    x =  depth * sin_phi * cos_theta
+    y =  depth * cos_phi
+    z = -depth * sin_phi * sin_theta
+
+    # ── Vertical tangent (phi / row direction) — no horizontal wrap ──────────
+    # Central differences; edge rows use one-sided (replicate boundary).
+    x_up   = torch.cat([x[:1, :],  x[:-1, :]], dim=0)
+    x_down = torch.cat([x[1:,  :], x[-1:, :]], dim=0)
+    y_up   = torch.cat([y[:1, :],  y[:-1, :]], dim=0)
+    y_down = torch.cat([y[1:,  :], y[-1:, :]], dim=0)
+    z_up   = torch.cat([z[:1, :],  z[:-1, :]], dim=0)
+    z_down = torch.cat([z[1:,  :], z[-1:, :]], dim=0)
+    tangent_phi = torch.stack([
+        (x_down - x_up) * 0.5,
+        (y_down - y_up) * 0.5,
+        (z_down - z_up) * 0.5,
+    ], dim=-1)  # [H, W, 3]
+
+    # ── Horizontal tangent (theta / col direction) — circular wrap ───────────
+    x_left  = torch.roll(x, shifts=1,  dims=1)
+    x_right = torch.roll(x, shifts=-1, dims=1)
+    y_left  = torch.roll(y, shifts=1,  dims=1)
+    y_right = torch.roll(y, shifts=-1, dims=1)
+    z_left  = torch.roll(z, shifts=1,  dims=1)
+    z_right = torch.roll(z, shifts=-1, dims=1)
+    tangent_theta = torch.stack([
+        (x_right - x_left) * 0.5,
+        (y_right - y_left) * 0.5,
+        (z_right - z_left) * 0.5,
+    ], dim=-1)  # [H, W, 3]
+
+    # Surface normal = cross(tangent_phi, tangent_theta)
+    normals = torch.cross(tangent_phi, tangent_theta, dim=-1)   # [H, W, 3]
+    normal_mag = normals.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+    normals = normals / normal_mag
+
+    # Orient inward (toward camera at origin)
+    positions = torch.stack([x, y, z], dim=-1)
+    dot = (normals * positions).sum(dim=-1, keepdim=True)
+    normals = torch.where(dot > 0, -normals, normals)
+
+    # ── Confidence ────────────────────────────────────────────────────────────
+    # Low at depth discontinuities where the cross-product normal is unreliable.
+    d_left  = torch.roll(depth, shifts=1,  dims=1)
+    d_right = torch.roll(depth, shifts=-1, dims=1)
+    d_up    = torch.cat([depth[:1, :], depth[:-1, :]], dim=0)
+    d_down  = torch.cat([depth[1:, :], depth[-1:, :]], dim=0)
+    depth_gx = (d_right - d_left) * 0.5
+    depth_gy = (d_down  - d_up)   * 0.5
+    depth_grad = torch.sqrt(depth_gx ** 2 + depth_gy ** 2)
+    median_grad = depth_grad.median().clamp(min=1e-8)
+    confidence = torch.exp(-depth_grad / median_grad)
+
+    return normals, confidence
+
+
 def equirect_to_gaussians(
     image: torch.Tensor,
     depth: torch.Tensor,
@@ -24,7 +108,8 @@ def equirect_to_gaussians(
     depth_max: float = 100.0,
     pole_rows: int = 3,
     default_opacity: float = 0.95,
-    validity_mask: Optional[torch.Tensor] = None
+    validity_mask: Optional[torch.Tensor] = None,
+    oriented_gaussians: bool = True,
 ) -> dict:
     """
     Convert equirectangular panorama with depth to 3D Gaussians.
@@ -40,6 +125,10 @@ def equirect_to_gaussians(
         pole_rows: Rows to exclude at top/bottom poles
         default_opacity: Opacity for all Gaussians
         validity_mask: Optional [H, W] mask from depth model (0-1 or bool)
+        oriented_gaussians: When True (default), orient Gaussians along
+            depth-derived surface normals instead of the pure spherical
+            normal.  This makes flat surfaces (floors, walls) render as
+            properly-aligned discs rather than camera-facing billboards.
     
     Returns:
         Dict with:
@@ -108,17 +197,53 @@ def equirect_to_gaussians(
     # ─────────────────────────────────────────────────────────────────
     # Rotation Matrix → Quaternion
     # ─────────────────────────────────────────────────────────────────
-    # Build rotation matrix R where columns are [right, up, normal]
-    # Normal points inward (toward camera), same as -rhat
-    normal = -grid.rhat
-    right = grid.tangent_right
-    up = grid.tangent_up
-    
-    # R = [right | up | normal] as column vectors
-    R = torch.stack([right, up, normal], dim=-1)  # [H, W, 3, 3]
-    
+    if oriented_gaussians:
+        # Depth-derived surface normals give proper orientation for floors,
+        # walls, and other non-radial surfaces.  At depth discontinuities
+        # (where the cross-product normal is noisy), we blend back toward
+        # the safe spherical normal using the confidence weight.
+        depth_normals, normal_conf = _estimate_normals_torch(
+            depth, grid.phi, grid.theta
+        )   # [H_grid, W_grid, 3],  [H_grid, W_grid]
+
+        # Blend: confident surface pixels → depth normal,
+        #        uncertain (edges, sky) → spherical normal
+        spherical_n = -grid.rhat                        # [H_grid, W_grid, 3]
+        blend = normal_conf.unsqueeze(-1)               # [H_grid, W_grid, 1]
+        blended_n = depth_normals * blend + spherical_n * (1.0 - blend)
+        blended_n = blended_n / blended_n.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+
+        # Build tangent frame via Gram–Schmidt (world Y-up as reference).
+        # Near-vertical normals (poles, skyward surfaces) fall back to world Z.
+        world_up = torch.tensor(
+            [0., 1., 0.], device=device, dtype=depth.dtype
+        ).view(1, 1, 3).expand(H_grid, W_grid, 3)
+        world_z = torch.tensor(
+            [0., 0., 1.], device=device, dtype=depth.dtype
+        ).view(1, 1, 3).expand(H_grid, W_grid, 3)
+
+        t1 = torch.cross(blended_n, world_up, dim=-1)
+        t1 = t1 / t1.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+
+        t1_pole = torch.cross(blended_n, world_z, dim=-1)
+        t1_pole = t1_pole / t1_pole.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+
+        near_vertical = (blended_n[..., 1].abs() > 0.99).unsqueeze(-1).expand_as(t1)
+        t1 = torch.where(near_vertical, t1_pole, t1)
+
+        t2 = torch.cross(blended_n, t1, dim=-1)
+
+        R = torch.stack([t1, t2, blended_n], dim=-1)   # [H_grid, W_grid, 3, 3]
+    else:
+        # Original spherical-normal frame (backward-compatible)
+        normal_conf = torch.ones(H_grid, W_grid, device=device, dtype=depth.dtype)
+        normal = -grid.rhat
+        right  = grid.tangent_right
+        up     = grid.tangent_up
+        R = torch.stack([right, up, normal], dim=-1)    # [H_grid, W_grid, 3, 3]
+
     # Convert to quaternion
-    quats = rotation_matrix_to_quaternion(R)  # [H, W, 4] in XYZW
+    quats = rotation_matrix_to_quaternion(R)            # [H_grid, W_grid, 4] XYZW
 
     # Poles: instead of excluding top/bottom rows, merge them into fewer
     # larger Gaussians (ERP grid converges at the poles, so many pixels
@@ -294,7 +419,7 @@ def equirect_to_gaussians(
     
     # Opacities
     if default_opacity < 0:
-        # Use depth gradient to define opacity (Item 4)
+        # Use depth gradient to define opacity
         dx = F.pad(depth[:, 1:] - depth[:, :-1], (0, 1))
         dy = F.pad(depth[1:, :] - depth[:-1, :], (0, 0, 0, 1))
         grad_mag = torch.sqrt(dx**2 + dy**2) / depth.clamp(min=0.1)
@@ -302,8 +427,14 @@ def equirect_to_gaussians(
         opms = (0.99 - 0.5 * torch.sigmoid(grad_mag * 10 - 3)).unsqueeze(-1)
         opacities_flat = opms.reshape(-1, 1)[valid_mask_flat]
     else:
-        # Constant opacity fallback
-        opacities_flat = torch.full((means_flat.shape[0], 1), default_opacity, device=device)
+        # Modulate by normal confidence: confident surfaces → full opacity,
+        # uncertain regions (edges, discontinuities) → slightly reduced.
+        # Formula: opacity = clamp(conf * 1.2, 0.01, default_opacity)
+        # This fades Gaussians whose orientation is unreliable rather than
+        # hiding them entirely — a subtle quality improvement.
+        conf_scale = (normal_conf * 1.2).clamp(0.01, 1.0)
+        op_map = (conf_scale * default_opacity).clamp(0.01, 0.99)
+        opacities_flat = op_map.reshape(-1, 1)[valid_mask_flat]
     if pole_means_list:
         pm = torch.stack(pole_means_list, dim=0)
         ps = torch.stack(pole_scales_list, dim=0)
@@ -494,6 +625,7 @@ def equirect_to_gaussians_refined(
     scale_blend: float = 0.8,
     opacity_blend: float = 1.0,
     color_blend: float = 0.5,
+    oriented_gaussians: bool = True,
 ) -> dict:
     """
     Convert ERP panorama to Gaussians with optional SHARP refinements.
@@ -511,7 +643,8 @@ def equirect_to_gaussians_refined(
         image, depth, grid,
         scale_factor, thickness_ratio,
         depth_min, depth_max, pole_rows,
-        default_opacity, validity_mask
+        default_opacity, validity_mask,
+        oriented_gaussians=oriented_gaussians,
     )
 
     if refined_attrs is None:

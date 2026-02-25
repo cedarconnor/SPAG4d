@@ -43,6 +43,41 @@ def test_da3():
         traceback.print_exc()
         return False
 
+def test_da3_perspective_with_base_model():
+    log("Testing Depth Anything V3 in perspective mode with DAP base anchor...")
+    try:
+        from spag4d.da3_model import DA3Model
+        from spag4d.dap_model import MockDAPModel
+        
+        # Create dummy image [H, W, C]
+        H, W = 512, 1024
+        img = torch.rand(H, W, 3).cuda()
+        
+        # Load mock DAP base model
+        base_dap = MockDAPModel.load(device=torch.device("cuda"))
+        
+        # Load DA3 model
+        da3_model = DA3Model.load(variant="metric", device=torch.device("cuda"))
+        
+        # Run inference using perspective mode and base_model
+        depth, mask = da3_model.predict(img, projection_mode="cubemap", base_model=base_dap)
+        log(f"Inference successful with DAP global anchor. Depth shape: {depth.shape}")
+        
+        if depth.shape != (H, W):
+            log(f"FAIL: Output shape mismatch! Expected {(H, W)}, got {depth.shape}")
+            return False
+            
+        return True
+            
+    except ImportError as e:
+        log(f"FAIL: DA3 Not installed or Import Error: {e}")
+        return False
+    except Exception as e:
+        log(f"FAIL: Runtime Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 def test_bat_logic():
     log("Testing SPAG4D.bat logic (Server Startup)...")
     # The bat file basically activates venv and runs:
@@ -85,9 +120,10 @@ def main():
         log("WARNING: CUDA not available, strictly speaking this test requires CUDA for SPAG-4D models.")
         
     da3_ok = test_da3()
+    da3_cube_ok = test_da3_perspective_with_base_model()
     bat_ok = test_bat_logic()
     
-    if da3_ok and bat_ok:
+    if da3_ok and da3_cube_ok and bat_ok:
         log("ALL TESTS PASSED.")
         sys.exit(0)
     else:

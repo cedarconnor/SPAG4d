@@ -62,16 +62,43 @@ echo [2/4] Installing SPAG-4D Core Requirements...
 !PIP! install -e ".[server,download]"
 
 echo.
-echo [3/4] Installing Optional SHARP Model...
-!PIP! install --no-deps https://github.com/apple/ml-sharp/archive/refs/heads/main.zip
+echo [3/4] Installing SHARP Model...
+if not exist "ml-sharp\pyproject.toml" (
+    echo Cloning SHARP manually...
+    git clone https://github.com/apple/ml-sharp ml-sharp
+)
+!PIP! install --no-deps -e ml-sharp
 
 echo.
-echo [4/5] Installing Optional Depth Anything V3 Model...
+echo [4/5] Installing Depth Anything V3 Model...
 !PIP! install hatchling moviepy^<2.0.0 pycolmap trimesh evo
-!PIP! install --no-deps --no-build-isolation https://github.com/ByteDance-Seed/depth-anything-3/archive/refs/heads/main.zip
+if not exist "src\depth-anything-3\pyproject.toml" (
+    echo Cloning Depth Anything V3 manually...
+    git clone https://github.com/ByteDance-Seed/depth-anything-3 "src\depth-anything-3"
+)
+!PIP! install --no-deps --no-build-isolation -e "src\depth-anything-3"
 
 echo.
-echo [5/5] Installing Optional DAP Model...
+echo [5/6] Installing Apple Depth Pro (optional - Phase 1 high-quality depth)...
+if not exist "src\ml-depth-pro\pyproject.toml" (
+    echo Cloning Apple Depth Pro...
+    git clone https://github.com/apple/ml-depth-pro "src\ml-depth-pro"
+)
+if exist "src\ml-depth-pro\pyproject.toml" (
+    !PIP! install --no-deps -e "src\ml-depth-pro"
+    echo [INFO] Apple Depth Pro installed successfully.
+    
+    echo Downloading Depth Pro Weights...
+    if not exist "checkpoints\depth_pro.pt" (
+        mkdir checkpoints 2>nul
+        powershell -Command "Invoke-WebRequest -Uri 'https://ml-site.cdn-apple.com/models/depth-pro/depth_pro.pt' -OutFile 'checkpoints\depth_pro.pt'"
+    )
+) else (
+    echo [WARN] Apple Depth Pro clone failed. Skipping - Phase 1 depth fusion will be unavailable.
+)
+
+echo.
+echo [6/6] Installing DAP Model...
 !PIP! install einops opencv-python
 if not exist "spag4d\dap_arch\DAP\networks" (
     echo Initializing DAP submodule...

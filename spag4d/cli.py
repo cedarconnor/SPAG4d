@@ -55,6 +55,8 @@ def main():
               help='Blend factor for SHARP scales (0=geometric only, 1=SHARP only)')
 @click.option('--opacity-blend', type=float, default=1.0,
               help='Blend factor for SHARP opacities')
+@click.option('--sharp-depth-fuse/--no-sharp-depth-fuse', default=False,
+              help='Use SHARP depth on cubemap faces for Phase 1 depth fusion')
 def convert(
     input_path: str,
     output_path: str,
@@ -81,6 +83,7 @@ def convert(
     scale_blend: float,
     opacity_blend: float,
     guided_strength: float,
+    sharp_depth_fuse: bool,
 ):
     """
     Convert equirectangular panorama to Gaussian splat.
@@ -142,6 +145,7 @@ def convert(
                     guided_strength=guided_strength,
                     scale_blend=scale_blend,
                     opacity_blend=opacity_blend,
+                    sharp_depth_fuse=sharp_depth_fuse,
                 )
                 
                 if not quiet:
@@ -175,6 +179,7 @@ def convert(
             guided_strength=guided_strength,
             scale_blend=scale_blend,
             opacity_blend=opacity_blend,
+            sharp_depth_fuse=sharp_depth_fuse,
         )
         
         if not quiet:
@@ -297,11 +302,14 @@ def serve(port: int, host: str, reload: bool):
               help='Blend factor for SHARP scales (0=geometric only, 1=SHARP only)')
 @click.option('--opacity-blend', type=float, default=1.0,
               help='Blend factor for SHARP opacities')
+@click.option('--sharp-depth-fuse/--no-sharp-depth-fuse', default=False,
+              help='Use SHARP depth on cubemap faces for Phase 1 depth fusion')
 def convert_video(input_video: str, output_dir: str, fps: int, start: float, duration: float,
                   stride: int, stabilize: bool, device: str, sharp_refine: bool,
                   sharp_cubemap_size: int, sharp_projection: str,
                   depth_model: str, guided_filter: bool,
-                  scale_blend: float, opacity_blend: float):
+                  scale_blend: float, opacity_blend: float,
+                  sharp_depth_fuse: bool):
     """
     Extract frames from 360° video and convert each to Gaussian splat.
     """
@@ -381,6 +389,7 @@ def convert_video(input_video: str, output_dir: str, fps: int, start: float, dur
                         force_erp=True,
                         scale_blend=scale_blend,
                         opacity_blend=opacity_blend,
+                        sharp_depth_fuse=sharp_depth_fuse,
                     )
 
                     # Apply stabilization rotation to written PLY

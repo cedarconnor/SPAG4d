@@ -196,7 +196,21 @@ async def convert_panorama(
     depth_model: str = Query("panda"),
     da3_projection: str = Query("equirectangular"),
     guided_filter: bool = Query(True),
-    guided_strength: float = Query(0.25, ge=0.0, le=1.0)
+    guided_strength: float = Query(0.25, ge=0.0, le=1.0),
+    # Phase 3: Sky & pole filtering
+    sky_mode: str = Query("sphere"),           # "skip" | "sphere" | "low_opacity"
+    pole_thinning: bool = Query(True),
+    sky_detection: str = Query("gradient"),   # "gradient" | "depth" | "none"
+    # Phase 5: Adaptive stride
+    adaptive_stride: bool = Query(False),
+    target_gaussians: Optional[int] = Query(None, gt=0),
+    edge_refine: bool = Query(False),
+    # Phase 4: Depth blending
+    blend_mode: str = Query("laplacian"),   # "feathered" | "laplacian" | "none"
+    blend_levels: int = Query(5, ge=2, le=8),
+    # Phase 1: Cubemap SHARP Depth fusion
+    sharp_depth_fuse: bool = Query(False),
+    face_size: int = Query(1536, ge=128, le=1536),
 ):
     """
     Convert uploaded panorama to Gaussian splat.
@@ -230,7 +244,17 @@ async def convert_panorama(
         "opacity_blend": opacity_blend,
         "sharp_cubemap_size": sharp_cubemap_size,
         "sky_threshold": sky_threshold,
-        "sky_dome": sky_dome
+        "sky_dome": sky_dome,
+        "sky_mode": sky_mode,
+        "pole_thinning": pole_thinning,
+        "sky_detection": sky_detection,
+        "adaptive_stride": adaptive_stride,
+        "target_gaussians": target_gaussians,
+        "edge_refine": edge_refine,
+        "blend_mode": blend_mode,
+        "blend_levels": blend_levels,
+        "sharp_depth_fuse": sharp_depth_fuse,
+        "face_size": face_size,
     }
     
     # Re-initialize processor if depth model changed
@@ -267,7 +291,12 @@ async def convert_panorama(
         job, stride, scale_factor, thickness, global_scale, depth_min, depth_max,
         sharp_refine, sharp_projection, scale_blend, opacity_blend,
         sharp_cubemap_size, sky_threshold, color_blend=color_blend,
-        sky_dome=sky_dome, da3_projection=da3_projection
+        sky_dome=sky_dome, da3_projection=da3_projection,
+        sky_mode=sky_mode, pole_thinning=pole_thinning, sky_detection=sky_detection,
+        adaptive_stride=adaptive_stride, target_gaussians=target_gaussians,
+        edge_refine=edge_refine,
+        blend_mode=blend_mode, blend_levels=blend_levels,
+        sharp_depth_fuse=sharp_depth_fuse, face_size=face_size,
     ))
     
     return JSONResponse({
@@ -293,6 +322,7 @@ async def convert_video(
     stabilize_video: bool = Query(False),
     color_blend: float = Query(0.5, ge=0.0, le=1.0),
     opacity_blend: float = Query(1.0, ge=0.0, le=1.0),
+    sharp_depth_fuse: bool = Query(False),
     sharp_cubemap_size: int = Query(1536),
     sky_threshold: float = Query(80.0),
     sky_dome: bool = Query(True),
@@ -337,7 +367,7 @@ async def convert_video(
         job, fps, stride, scale_factor, thickness, global_scale, depth_min, depth_max,
         sky_threshold,
         start_time, duration, temporal_alpha, stabilize_video, scale_blend, opacity_blend,
-        sharp_cubemap_size, color_blend, da3_projection=da3_projection
+        sharp_depth_fuse, sharp_cubemap_size, color_blend, da3_projection=da3_projection
     ))
     
     return JSONResponse({
@@ -353,7 +383,6 @@ async def process_job(
     scale_factor: float,
     thickness: float,
     global_scale: float,
-
     depth_min: float,
     depth_max: float,
     sharp_refine: bool = True,
@@ -365,7 +394,17 @@ async def process_job(
     color_blend: float = 0.5,
     sky_dome: bool = True,
     da3_projection: str = "equirectangular",
-    guided_strength: float = 0.25
+    guided_strength: float = 0.25,
+    sky_mode: str = "sphere",
+    pole_thinning: bool = True,
+    sky_detection: str = "gradient",
+    adaptive_stride: bool = False,
+    target_gaussians: Optional[int] = None,
+    edge_refine: bool = False,
+    blend_mode: str = "laplacian",
+    blend_levels: int = 5,
+    sharp_depth_fuse: bool = False,
+    face_size: int = 1536,
 ):
     """Process conversion job with GPU semaphore."""
     global processor
@@ -417,7 +456,17 @@ async def process_job(
                 sky_threshold=sky_threshold,
                 sky_dome=sky_dome,
                 da3_projection=da3_projection,
-                guided_strength=guided_strength
+                guided_strength=guided_strength,
+                sky_mode=sky_mode,
+                pole_thinning=pole_thinning,
+                sky_detection=sky_detection,
+                adaptive_stride=adaptive_stride,
+                target_gaussians=target_gaussians,
+                edge_refine=edge_refine,
+                blend_mode=blend_mode,
+                blend_levels=blend_levels,
+                sharp_depth_fuse=sharp_depth_fuse,
+                face_size=face_size,
             )
             
             # Generate web preview (low-res SPLAT)
@@ -482,6 +531,7 @@ async def process_video_job(
     stabilize_video: bool = False,
     scale_blend: float = 0.5,
     opacity_blend: float = 1.0,
+    sharp_depth_fuse: bool = False,
     sharp_cubemap_size: int = 1536,
     color_blend: float = 0.5,
     da3_projection: str = "equirectangular",
@@ -594,9 +644,32 @@ async def process_video_job(
                 job.current_frame = i + 1
                 job.last_updated = time.time()
 
-                # Get depth (move back to GPU)
-                depth = depths[i].to(processor.device)
-                mask = masks[i].to(processor.device) if masks else None
+                # Load image for conversion
+                img = Image.open(frame_path).convert('RGB')
+                img_tensor = torch.from_numpy(np.array(img)).to(processor.device)
+
+                # ─────────────────────────────────────────────────────────────────
+                # Phase 1: Cubemap SHARP Depth fusion (optional high-quality detail)
+                # ─────────────────────────────────────────────────────────────────
+                if sharp_depth_fuse:
+                    try:
+                        from spag4d.sharp_depth_fusion import SharpDepthFusion
+                        from spag4d.depth_blend import DepthBlender, BlendMode
+                        if processor._sharp_depth_fusion is None or processor._sharp_depth_fusion.face_size != sharp_cubemap_size:
+                            processor._sharp_depth_fusion = SharpDepthFusion(
+                                processor.device,
+                                face_size=sharp_cubemap_size,
+                            )
+                        processor._sharp_depth_fusion.load_model()
+                        _image_np_uint8 = np.array(img).astype(np.uint8)
+                        _dap_np = depth.cpu().numpy().astype(np.float32)
+                        _dp_detail_np, _dp_confidence_np = processor._sharp_depth_fusion.fuse(_image_np_uint8, _dap_np)
+                        
+                        blender = DepthBlender(mode=BlendMode.LAPLACIAN, n_levels=5, low_freq_cutoff=2)
+                        _fused_depth = blender.fuse(_dap_np, _dp_detail_np, confidence=_dp_confidence_np)
+                        depth = torch.from_numpy(_fused_depth).to(processor.device)
+                    except Exception as e:
+                        print(f"SHARP Depth fusion failed on frame {i}: {e}")
 
                 # Apply temporal smoothing to depth (EMA)
                 if prev_depth is not None and temporal_alpha > 0:
@@ -616,10 +689,6 @@ async def process_video_job(
                         validity_mask = validity_mask * sky_mask
                     else:
                         validity_mask = sky_mask
-
-                # Load image for conversion
-                img = Image.open(frame_path).convert('RGB')
-                img_tensor = torch.from_numpy(np.array(img)).to(processor.device)
 
                 # Create spherical grid
                 H, W = img_tensor.shape[:2]

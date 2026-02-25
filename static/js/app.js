@@ -63,6 +63,7 @@ class SPAG4DApp {
         this.guidedFilterInput = document.getElementById('guided-filter');
         this.guidedStrengthInput = document.getElementById('guided-strength');
         this.guidedStrengthGroup = document.getElementById('guided-strength-group');
+        this.sharpDepthFuseInput = document.getElementById('sharp-depth-fuse');
 
         // DA3 specific elements
         this.da3ProjectionInput = document.getElementById('da3-projection');
@@ -380,7 +381,8 @@ class SPAG4DApp {
             depth_model: this.depthModelSelect ? this.depthModelSelect.value : 'panda',
             da3_projection: this.da3ProjectionInput ? this.da3ProjectionInput.value : 'equirectangular',
             guided_filter: this.guidedFilterInput ? this.guidedFilterInput.checked : true,
-            guided_strength: this.guidedStrengthInput ? this.guidedStrengthInput.value : 0.25
+            guided_strength: this.guidedStrengthInput ? this.guidedStrengthInput.value : 0.25,
+            sharp_depth_fuse: this.sharpDepthFuseInput ? this.sharpDepthFuseInput.checked : false
         });
 
         try {
@@ -396,6 +398,7 @@ class SPAG4DApp {
                 params.append('opacity_blend', this.opacityBlendInput ? this.opacityBlendInput.value : 1.0);
                 params.append('sharp_cubemap_size', this.sharpCubemapSizeInput ? this.sharpCubemapSizeInput.value : 1536);
                 params.append('sky_threshold', this.skyThresholdInput ? this.skyThresholdInput.value : 80.0);
+                params.append('sharp_depth_fuse', this.sharpDepthFuseInput ? this.sharpDepthFuseInput.checked : false);
                 if (this.videoDurationInput.value) {
                     params.append('duration', this.videoDurationInput.value);
                 }

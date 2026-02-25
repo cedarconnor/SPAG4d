@@ -94,7 +94,8 @@ class DA3Model:
         self,
         image: torch.Tensor,
         return_mask: bool = False,
-        projection_mode: str = "equirectangular"
+        projection_mode: str = "equirectangular",
+        base_model = None
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Predict depth from equirectangular image.
@@ -117,7 +118,7 @@ class DA3Model:
             img_np = (image.cpu().float() * 255).clamp(0, 255).byte().numpy()
 
         if projection_mode in ["cubemap", "icosahedral"]:
-            return self._predict_projected(img_np, H, W, projection_mode)
+            return self._predict_projected(img_np, H, W, projection_mode, base_model=base_model, image_tensor=image)
         else:
             return self._predict_single(img_np, H, W)
 
@@ -178,14 +179,21 @@ class DA3Model:
         erp_img_np: np.ndarray,
         H: int,
         W: int,
-        projection_mode: str
+        projection_mode: str,
+        base_model = None,
+        image_tensor = None
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Predict depth using projected faces aligned to a global low-res depth map."""
         from spag4d.projection import get_projector
         
         # 1. First, get a global "base" depth prediction to serve as scale/shift calibration.
-        #    We cap the resolution lower (e.g. 1024) to keep it fast, as we only need it for alignment.
-        global_depth, global_mask = self._predict_single(erp_img_np, H, W, process_res_cap=1024)
+        #    If base_model is provided (e.g. DAP), use it for a superior latlong anchor.
+        #    Otherwise, cap the resolution lower (e.g. 1024) to keep DA3 fast for alignment.
+        global_mask = None
+        if base_model is not None and image_tensor is not None:
+             global_depth, global_mask = base_model.predict(image_tensor)
+        else:
+             global_depth, global_mask = self._predict_single(erp_img_np, H, W, process_res_cap=1024)
         
         # 2. Get the appropriate projector and project the high-res ERP image
         # Determine an appropriate face size depending on the input resolution
