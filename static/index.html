@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SPAG-4D | 360° to Gaussian Splat</title>
     <meta name="description" content="Convert 360° equirectangular panoramas to 3D Gaussian Splat files">
-    <link rel="stylesheet" href="css/style.css?v=3">
+    <link rel="stylesheet" href="css/style.css?v=5">
     <script src="js/three.min.js"></script>
 </head>
 
@@ -59,7 +59,7 @@
                             <select id="splat-quality" class="sm-select"
                                 title="Quality: &#10;Preview: Low res (Fast). &#10;Full HQ: High res (Slow)." disabled>
                                 <option value="preview">Preview</option>
-                                <option value="full">Full HQ</option>
+                                <option value="full" selected>Full HQ</option>
                             </select>
                             <button id="orbit-view-btn" class="sm-btn" title="Outside View (O)">Outside</button>
                             <label style="display: flex; align-items: center; gap: 4px; font-size: 0.8em; color: #aaa;"
@@ -243,9 +243,9 @@
                                 title="Depth estimation model. &#10;PanDA (CVPR 2025): Better edges, robust 360°. &#10;DA3: General purpose model. &#10;DAP (Legacy): Original model.">
                                 <label for="depth-model">Depth Model</label>
                                 <select id="depth-model">
-                                    <option value="panda" selected>PanDA</option>
+                                    <option value="panda">PanDA</option>
                                     <option value="da3">DA3</option>
-                                    <option value="dap">DAP (Legacy)</option>
+                                    <option value="dap" selected>DAP</option>
                                 </select>
                             </div>
 
@@ -342,7 +342,7 @@
                                 style="border-left: 1px solid #444; padding-left: 10px; margin-left: 5px;"
                                 title="Use ML-Sharp on 6 perspective cubemap faces to extract high-frequency structural detail scaling against DAP global geometry.">
                                 <label for="sharp-depth-fuse">Sharp Depth Fuse</label>
-                                <input type="checkbox" id="sharp-depth-fuse" style="width: 18px; height: 18px;">
+                                <input type="checkbox" id="sharp-depth-fuse" checked style="width: 18px; height: 18px;">
                             </div>
 
                             <div class="param-group"

@@ -193,7 +193,7 @@ async def convert_panorama(
     sky_threshold: float = Query(80.0),
     sky_dome: bool = Query(True),
     # Depth model selection
-    depth_model: str = Query("panda"),
+    depth_model: str = Query("dap"),
     da3_projection: str = Query("equirectangular"),
     guided_filter: bool = Query(True),
     guided_strength: float = Query(0.25, ge=0.0, le=1.0),
@@ -209,7 +209,7 @@ async def convert_panorama(
     blend_mode: str = Query("laplacian"),   # "feathered" | "laplacian" | "none"
     blend_levels: int = Query(5, ge=2, le=8),
     # Phase 1: Cubemap SHARP Depth fusion
-    sharp_depth_fuse: bool = Query(False),
+    sharp_depth_fuse: bool = Query(True),
     face_size: int = Query(1536, ge=128, le=1536),
     # Phase 6: Post-conversion Outlier Pruning
     outlier_pruning: float = Query(0.0, ge=0.0, le=1.0),
