@@ -240,7 +240,7 @@ class PanDAModel:
                 depth = F.interpolate(
                     depth.unsqueeze(1),
                     size=(H, W),
-                    mode='bilinear',
+                    mode='bicubic',
                     align_corners=True
                 ).squeeze(1)
 

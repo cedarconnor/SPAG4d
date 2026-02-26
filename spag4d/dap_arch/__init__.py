@@ -15,19 +15,21 @@ DAP_DIR = Path(__file__).parent / "DAP"
 
 
 def _ensure_dap_on_path():
-    """Ensure DAP directories are on sys.path (idempotent)."""
+    """Ensure DAP directories are at the front of sys.path (idempotent)."""
     if not DAP_DIR.exists():
         return
 
     dap_str = str(DAP_DIR)
-    if dap_str not in sys.path:
-        sys.path.insert(0, dap_str)
+    if dap_str in sys.path:
+        sys.path.remove(dap_str)
+    sys.path.insert(0, dap_str)
 
     depth_metric_dir = DAP_DIR / "depth_anything_v2_metric"
     if depth_metric_dir.exists():
         dm_str = str(depth_metric_dir)
-        if dm_str not in sys.path:
-            sys.path.insert(0, dm_str)
+        if dm_str in sys.path:
+            sys.path.remove(dm_str)
+        sys.path.insert(0, dm_str)
 
 
 def _flush_dap_module_cache():

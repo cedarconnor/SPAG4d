@@ -13,23 +13,28 @@ from pathlib import Path
 # Get the PanDA directory path
 PANDA_DIR = Path(__file__).parent / "PanDA"
 
-# Add PanDA subdirectory and its subdirectories to path for imports
-if PANDA_DIR.exists():
-    # Add main PanDA dir
-    if str(PANDA_DIR) not in sys.path:
-        sys.path.insert(0, str(PANDA_DIR))
+def _ensure_panda_on_path():
+    """Ensure PanDA directories are at the front of sys.path (idempotent)."""
+    if not PANDA_DIR.exists():
+        return
 
-    # Add depth_anything_v2_metric (shared with DAP)
+    panda_str = str(PANDA_DIR)
+    if panda_str in sys.path:
+        sys.path.remove(panda_str)
+    sys.path.insert(0, panda_str)
+
     depth_metric_dir = PANDA_DIR / "depth_anything_v2_metric"
-    if depth_metric_dir.exists() and str(depth_metric_dir) not in sys.path:
-        sys.path.insert(0, str(depth_metric_dir))
-
-    # Also check if DAP's depth_anything_v2_metric exists as fallback
     dap_metric_dir = Path(__file__).parent.parent / "dap_arch" / "DAP" / "depth_anything_v2_metric"
-    if not depth_metric_dir.exists() and dap_metric_dir.exists():
-        if str(dap_metric_dir) not in sys.path:
-            sys.path.insert(0, str(dap_metric_dir))
+    
+    target_metric_dir = depth_metric_dir if depth_metric_dir.exists() else dap_metric_dir
+    if target_metric_dir.exists():
+        dm_str = str(target_metric_dir)
+        if dm_str in sys.path:
+            sys.path.remove(dm_str)
+        sys.path.insert(0, dm_str)
 
+# Eagerly add to path at import time
+_ensure_panda_on_path()
 
 def build_panda_model(lora_rank: int = 4):
     """
@@ -43,20 +48,14 @@ def build_panda_model(lora_rank: int = 4):
     """
     import os
 
-    # Ensure PANDA_DIR is on sys.path and is FIRST — so PanDA's networks/
-    # directory is found before DAP's (which also has a 'networks/' package).
-    if PANDA_DIR.exists():
-        panda_str = str(PANDA_DIR)
-        # Remove first, then prepend, so it's always first priority
-        if panda_str in sys.path:
-            sys.path.remove(panda_str)
-        sys.path.insert(0, panda_str)
+    # Re-ensure path
+    _ensure_panda_on_path()
 
     # Evict any 'networks.*' entries that DAP may have cached in sys.modules.
     # DAP's networks/dap.py is incompatible with PanDA's networks/panda.py —
     # Python won't re-search sys.path for a module already in sys.modules,
     # so we must clear the stale cache before re-importing.
-    stale_prefixes = ('networks', 'depth_anything_v2_metric', 'depth_anything_v2', 'panda')
+    stale_prefixes = ('networks', 'depth_anything_v2_metric', 'depth_anything_v2', 'panda', 'dap')
     for key in list(sys.modules.keys()):
         for prefix in stale_prefixes:
             if key == prefix or key.startswith(prefix + '.'):
