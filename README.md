@@ -4,11 +4,9 @@ Convert 360° panoramic photos into explorable 3D Gaussian Splat scenes.
 
 SPAG-4D projects your equirectangular panorama onto cubemap or icosahedral faces, runs Apple's [ML-SHARP](https://github.com/apple/ml-sharp) on each face to predict dense 3D Gaussians, aligns them to metric depth from [DAP](https://github.com/Insta360-Research-Team/DAP), and merges everything into a standard PLY file you can view in any Gaussian Splatting renderer.
 
-<div align="center">
-
-https://github.com/cedarconnor/SPAG4d/raw/main/assets/demo.mp4
-
-</div>
+<p align="center">
+  <img src="assets/demo.gif" alt="SPAG-4D demo — panorama to 3D Gaussian splat" width="720">
+</p>
 
 ---
 
