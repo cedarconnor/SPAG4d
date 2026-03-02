@@ -154,6 +154,408 @@ def _compute_face_weight(
     return weight
 
 
+def _global_scale_alignment(
+    all_means_world: List[torch.Tensor],
+    all_scales: List[torch.Tensor],
+    all_face_forwards: List[np.ndarray],
+    face_fov: float,
+    dap_depth_np: Optional[np.ndarray] = None,
+    erp_H: int = 0,
+    erp_W: int = 0,
+    exclude_faces: Optional[set] = None,
+    feature_ratios: Optional[List[Tuple[int, int, float, int, float]]] = None,
+) -> List[torch.Tensor]:
+    """Globally consistent face alignment via pairwise overlap ratios.
+
+    The fundamental problem: per-face DAP alignment gives wildly different
+    scale factors (e.g. 3x for ground, 20x for sky). Post-hoc corrections
+    can't fix a 6x mismatch.
+
+    Solution: measure pairwise scale ratios in overlap zones (SHARP-to-SHARP,
+    which are reliable), then solve a global least-squares system for per-face
+    scales. Finally, apply ONE global DAP scale to anchor the scene to metric.
+
+    This replaces both the old per-face DAP alignment AND the old Procrustes.
+
+    Args:
+        all_means_world: list of [N_i, 3] world-frame positions per face
+                         (already DAP-aligned individually — we'll undo that)
+        all_scales: list of [N_i, 3] scale tensors per face
+        all_face_forwards: face center direction vectors
+        face_fov: face FOV in radians
+        dap_depth_np: [H, W] DAP depth map for global metric anchoring
+        erp_H, erp_W: ERP image dimensions
+
+    Returns:
+        all_means_world (modified in-place with globally consistent scales)
+    """
+    num_faces = len(all_means_world)
+    if num_faces < 2:
+        return all_means_world
+
+    if exclude_faces is None:
+        exclude_faces = set()
+
+    device = all_means_world[0].device
+
+    # --- Step 1: Find adjacent face pairs (skip excluded faces) ---
+    fwd_stack = np.stack(all_face_forwards, axis=0)
+    cos_matrix = fwd_stack @ fwd_stack.T
+    adjacency_threshold = np.cos(face_fov * 0.8)
+
+    pairs = []
+    for i in range(num_faces):
+        for j in range(i + 1, num_faces):
+            if i in exclude_faces or j in exclude_faces:
+                continue
+            if cos_matrix[i, j] > adjacency_threshold:
+                pairs.append((i, j))
+
+    if not pairs:
+        return all_means_world
+
+    if exclude_faces:
+        print(f"[SHARP-Direct]   Global alignment: {len(pairs)} pairs "
+              f"(excluded faces: {sorted(exclude_faces)})")
+    else:
+        print(f"[SHARP-Direct]   Global alignment: {len(pairs)} adjacent face pairs")
+
+    # Pre-compute unit directions
+    all_dirs = []
+    for i in range(num_faces):
+        if all_means_world[i].shape[0] > 0:
+            all_dirs.append(F.normalize(all_means_world[i], dim=-1))
+        else:
+            all_dirs.append(torch.zeros(0, 3, device=device))
+
+    # --- Step 2: Measure pairwise scale ratios ---
+    # Use SIFT feature-matched ratios as primary (3× confidence), then fall
+    # back to NN angular matching for pairs without feature measurements.
+    pairwise_log_ratios = []  # (i, j, log_ratio, n_matches, confidence)
+
+    # Track which pairs have feature-based measurements
+    feature_pairs = set()
+    if feature_ratios:
+        for fi, fj, lr, nm, conf in feature_ratios:
+            # 3× confidence boost for geometrically verified matches
+            pairwise_log_ratios.append((fi, fj, lr, nm, conf * 3.0))
+            feature_pairs.add((min(fi, fj), max(fi, fj)))
+        print(f"[SHARP-Direct]   {len(feature_ratios)} SIFT-based pairwise measurements")
+
+    # NN angular matching as fallback for pairs without SIFT matches
+    for fi, fj in pairs:
+        if (min(fi, fj), max(fi, fj)) in feature_pairs:
+            continue  # already have SIFT measurement for this pair
+
+        if all_means_world[fi].shape[0] < 50 or all_means_world[fj].shape[0] < 50:
+            continue
+
+        dirs_i = all_dirs[fi]
+        dirs_j = all_dirs[fj]
+
+        fwd_j = torch.tensor(all_face_forwards[fj], dtype=torch.float32, device=device)
+        fwd_i = torch.tensor(all_face_forwards[fi], dtype=torch.float32, device=device)
+
+        cos_to_j = (dirs_i * fwd_j).sum(dim=-1)
+        cos_to_i = (dirs_j * fwd_i).sum(dim=-1)
+
+        overlap_thresh = np.cos(face_fov * 0.4)
+        mask_i = cos_to_j > overlap_thresh
+        mask_j = cos_to_i > overlap_thresh
+
+        n_i = mask_i.sum().item()
+        n_j = mask_j.sum().item()
+        if n_i < 20 or n_j < 20:
+            continue
+
+        # Subsample for speed
+        max_match = 5000
+        if n_i > max_match:
+            idx = torch.randperm(n_i, device=device)[:max_match]
+            ov_dirs_i = dirs_i[mask_i][idx]
+            ov_pos_i = all_means_world[fi][mask_i][idx]
+        else:
+            ov_dirs_i = dirs_i[mask_i]
+            ov_pos_i = all_means_world[fi][mask_i]
+
+        if n_j > max_match:
+            idx = torch.randperm(n_j, device=device)[:max_match]
+            ov_dirs_j = dirs_j[mask_j][idx]
+            ov_pos_j = all_means_world[fj][mask_j][idx]
+        else:
+            ov_dirs_j = dirs_j[mask_j]
+            ov_pos_j = all_means_world[fj][mask_j]
+
+        # Nearest-neighbor matching in batches
+        batch_size = 1000
+        matched_r_i = []
+        matched_r_j = []
+
+        for start in range(0, ov_dirs_i.shape[0], batch_size):
+            end = min(start + batch_size, ov_dirs_i.shape[0])
+            cos_sim = ov_dirs_i[start:end] @ ov_dirs_j.T
+            best_j = cos_sim.argmax(dim=1)
+            best_cos = cos_sim[torch.arange(end - start, device=device), best_j]
+            good = best_cos > 0.999
+            if good.any():
+                matched_r_i.append(ov_pos_i[start:end][good].norm(dim=-1))
+                matched_r_j.append(ov_pos_j[best_j[good]].norm(dim=-1))
+
+        if not matched_r_i:
+            continue
+
+        r_i = torch.cat(matched_r_i)
+        r_j = torch.cat(matched_r_j)
+        valid = (r_i > 0.1) & (r_j > 0.1)
+        if valid.sum() < 10:
+            continue
+
+        log_ratio = torch.log(r_i[valid] / r_j[valid])
+        median_lr = torch.median(log_ratio).item()
+        # Confidence: inverse of IQR (tighter distribution = more reliable)
+        iqr = float((torch.quantile(log_ratio, 0.75) - torch.quantile(log_ratio, 0.25)).item())
+        confidence = 1.0 / max(iqr, 0.01)
+        n_matches = valid.sum().item()
+
+        pairwise_log_ratios.append((fi, fj, median_lr, n_matches, confidence))
+        print(f"[SHARP-Direct]     NN pair ({fi},{fj}): {n_matches} matches, "
+              f"ratio={np.exp(median_lr):.4f}, confidence={confidence:.1f}")
+
+    if not pairwise_log_ratios:
+        return all_means_world
+
+    # --- Step 3: Solve global least-squares for per-face log-scales ---
+    # System: for each pair (i,j) with measured log_ratio r_ij,
+    #   log_scale_i - log_scale_j ≈ r_ij
+    # This is an overdetermined system; solve via least-squares with
+    # the constraint that sum(log_scale) = 0 (preserve overall scale).
+
+    n_pairs = len(pairwise_log_ratios)
+    A = np.zeros((n_pairs, num_faces), dtype=np.float64)
+    b = np.zeros(n_pairs, dtype=np.float64)
+    w = np.zeros(n_pairs, dtype=np.float64)
+
+    for k, (fi, fj, lr, nm, conf) in enumerate(pairwise_log_ratios):
+        A[k, fi] = 1.0
+        A[k, fj] = -1.0
+        b[k] = lr
+        w[k] = conf * np.sqrt(nm)  # weight by confidence × sqrt(matches)
+
+    # Weighted least-squares: minimize ||W(Ax - b)||²
+    # Plus regularization toward zero (preserve original DAP scales)
+    Aw = A * w[:, np.newaxis]
+    bw = b * w
+
+    # Very weak regularization — DAP normalization already handled the bulk.
+    # The pairwise solver just needs to fix ~10-30% residual differences.
+    reg_strength = 0.01 * np.mean(w)
+    A_reg = np.eye(num_faces) * reg_strength
+    b_reg = np.zeros(num_faces)
+
+    A_full = np.vstack([Aw, A_reg])
+    b_full = np.concatenate([bw, b_reg])
+
+    # Solve via normal equations
+    log_scales, _, _, _ = np.linalg.lstsq(A_full, b_full, rcond=None)
+
+    # Normalize: mean log_scale = 0 (preserve overall scene scale)
+    log_scales -= np.mean(log_scales)
+
+    face_corrections = np.exp(log_scales)
+    print(f"[SHARP-Direct]   Global scale corrections: "
+          f"[{', '.join(f'{c:.3f}' for c in face_corrections)}]")
+
+    # --- Step 4: Apply corrections ---
+    for fi in range(num_faces):
+        c = face_corrections[fi]
+        if abs(c - 1.0) > 0.005 and all_means_world[fi].shape[0] > 0:
+            all_means_world[fi] = all_means_world[fi] * c
+            all_scales[fi] = all_scales[fi] * c
+
+    # --- Step 5: Global DAP anchoring ---
+    # Now all faces are mutually consistent. Apply ONE global scale to
+    # match DAP metric depth (instead of per-face DAP alignment).
+    if dap_depth_np is not None and erp_H > 0:
+        all_log_ratios = []
+        for fi in range(num_faces):
+            pos = all_means_world[fi]
+            if pos.shape[0] == 0:
+                continue
+            pos_np = pos.cpu().numpy()
+            r_sharp = np.linalg.norm(pos_np, axis=-1)
+
+            x, y, z = pos_np[:, 0], pos_np[:, 1], pos_np[:, 2]
+            r = r_sharp.clip(1e-8)
+            phi = np.arccos(np.clip(y / r, -1, 1))
+            theta = np.arctan2(-z, x) % (2 * np.pi)
+
+            row_f = (phi / np.pi * (erp_H - 1)).clip(0, erp_H - 1.001)
+            col_f = (1 - theta / (2 * np.pi)) * (erp_W - 1)
+            row0 = np.floor(row_f).astype(np.int32)
+            row1 = np.minimum(row0 + 1, erp_H - 1)
+            col0 = np.floor(col_f).astype(np.int32) % erp_W
+            col1 = (col0 + 1) % erp_W
+            fr = (row_f - row0).astype(np.float32)
+            fc = (col_f - col0).astype(np.float32)
+
+            dap_sampled = (
+                dap_depth_np[row0, col0] * (1 - fr) * (1 - fc) +
+                dap_depth_np[row1, col0] * fr * (1 - fc) +
+                dap_depth_np[row0, col1] * (1 - fr) * fc +
+                dap_depth_np[row1, col1] * fr * fc
+            )
+
+            valid = (r_sharp > 0.1) & (dap_sampled > 0.1)
+            if valid.sum() > 100:
+                lr = np.log(dap_sampled[valid]) - np.log(r_sharp[valid])
+                all_log_ratios.append(lr)
+
+        if all_log_ratios:
+            combined = np.concatenate(all_log_ratios)
+            global_dap_scale = float(np.exp(np.median(combined)))
+            global_dap_scale = np.clip(global_dap_scale, 0.1, 10.0)
+            print(f"[SHARP-Direct]   Global DAP metric scale: {global_dap_scale:.3f}")
+
+            for fi in range(num_faces):
+                if all_means_world[fi].shape[0] > 0:
+                    all_means_world[fi] = all_means_world[fi] * global_dap_scale
+                    all_scales[fi] = all_scales[fi] * global_dap_scale
+
+    return all_means_world
+
+
+def _feature_match_pairwise_ratios(
+    faces_list,
+    face_depth_maps: Dict[int, np.ndarray],
+    face_scale_factors: List[float],
+    cubemap_size: int,
+    grid_size: int,
+    face_fov: float,
+    all_face_forwards: List[np.ndarray],
+    exclude_faces: Optional[set] = None,
+    min_matches: int = 10,
+) -> List[Tuple[int, int, float, int, float]]:
+    """Use SIFT feature-point matching to compute pairwise depth ratios.
+
+    For each adjacent face pair, extracts SIFT keypoints from both face images,
+    matches them with Lowe's ratio test + RANSAC, then compares SHARP depth at
+    verified corresponding pixel locations.
+
+    Returns list of (fi, fj, median_log_ratio, n_matches, confidence) — same
+    format as _global_scale_alignment Step 2 pairwise measurements.
+    """
+    import cv2
+
+    num_faces = len(faces_list)
+    if exclude_faces is None:
+        exclude_faces = set()
+
+    # --- Find adjacent pairs (same logic as _global_scale_alignment) ---
+    fwd_stack = np.stack(all_face_forwards, axis=0)
+    cos_matrix = fwd_stack @ fwd_stack.T
+    adjacency_threshold = np.cos(face_fov * 0.8)
+
+    pairs = []
+    for i in range(num_faces):
+        for j in range(i + 1, num_faces):
+            if i in exclude_faces or j in exclude_faces:
+                continue
+            if cos_matrix[i, j] > adjacency_threshold:
+                pairs.append((i, j))
+
+    if not pairs:
+        return []
+
+    # --- SIFT extraction per face (cached) ---
+    sift = cv2.SIFT_create(nfeatures=2000)
+    face_kp_desc = {}  # face_idx -> (keypoints, descriptors)
+
+    needed_faces = set()
+    for i, j in pairs:
+        needed_faces.add(i)
+        needed_faces.add(j)
+
+    for fi in needed_faces:
+        face_np = faces_list[fi]
+        # Resize to grid_size×grid_size (768) to match depth map resolution
+        face_resized = cv2.resize(face_np, (grid_size, grid_size))
+        gray = cv2.cvtColor(face_resized, cv2.COLOR_RGB2GRAY)
+        kp, desc = sift.detectAndCompute(gray, None)
+        face_kp_desc[fi] = (kp, desc)
+
+    # --- Match each pair ---
+    bf = cv2.BFMatcher(cv2.NORM_L2)
+    results = []
+
+    for fi, fj in pairs:
+        kp_i, desc_i = face_kp_desc[fi]
+        kp_j, desc_j = face_kp_desc[fj]
+
+        if desc_i is None or desc_j is None or len(kp_i) < 10 or len(kp_j) < 10:
+            continue
+
+        # KNN match + Lowe's ratio test
+        raw_matches = bf.knnMatch(desc_i, desc_j, k=2)
+        good_matches = []
+        for m_pair in raw_matches:
+            if len(m_pair) == 2:
+                m, n = m_pair
+                if m.distance < 0.75 * n.distance:
+                    good_matches.append(m)
+
+        if len(good_matches) < min_matches:
+            continue
+
+        # RANSAC geometric filter
+        pts_i = np.float32([kp_i[m.queryIdx].pt for m in good_matches])
+        pts_j = np.float32([kp_j[m.trainIdx].pt for m in good_matches])
+
+        _, mask = cv2.findHomography(pts_i, pts_j, cv2.RANSAC, 5.0)
+        if mask is None:
+            continue
+
+        inlier_mask = mask.ravel().astype(bool)
+        pts_i = pts_i[inlier_mask]
+        pts_j = pts_j[inlier_mask]
+
+        if len(pts_i) < min_matches:
+            continue
+
+        # --- Depth lookup at matched keypoint locations ---
+        depth_map_i = face_depth_maps.get(fi)
+        depth_map_j = face_depth_maps.get(fj)
+        if depth_map_i is None or depth_map_j is None:
+            continue
+
+        sf_i = face_scale_factors[fi] if fi < len(face_scale_factors) else 1.0
+        sf_j = face_scale_factors[fj] if fj < len(face_scale_factors) else 1.0
+
+        # OpenCV keypoint.pt = (x, y) = (col, row)
+        rows_i = np.round(pts_i[:, 1]).astype(int).clip(0, grid_size - 1)
+        cols_i = np.round(pts_i[:, 0]).astype(int).clip(0, grid_size - 1)
+        rows_j = np.round(pts_j[:, 1]).astype(int).clip(0, grid_size - 1)
+        cols_j = np.round(pts_j[:, 0]).astype(int).clip(0, grid_size - 1)
+
+        d_i = depth_map_i[rows_i, cols_i] * sf_i
+        d_j = depth_map_j[rows_j, cols_j] * sf_j
+
+        valid = (d_i > 0.1) & (d_j > 0.1)
+        if valid.sum() < min_matches:
+            continue
+
+        log_ratio = np.log(d_i[valid] / d_j[valid])
+        median_lr = float(np.median(log_ratio))
+        iqr = float(np.quantile(log_ratio, 0.75) - np.quantile(log_ratio, 0.25))
+        confidence = 1.0 / max(iqr, 0.01)
+        n_matches = int(valid.sum())
+
+        results.append((fi, fj, median_lr, n_matches, confidence))
+        print(f"[SHARP-Direct]     SIFT pair ({fi},{fj}): {n_matches} matches, "
+              f"ratio={np.exp(median_lr):.4f}, confidence={confidence:.1f}")
+
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
@@ -376,6 +778,9 @@ class SHARPGaussianPipeline:
         all_opacities = []
         all_face_labels = []
         face_scale_factors = []
+        face_depth_maps = {}  # face_idx -> [grid_size, grid_size] front-layer depth
+
+        grid_size = self.SHARP_INPUT_SIZE // 2  # 768
 
         for face_idx in range(num_faces):
             t_face = time.time()
@@ -388,8 +793,14 @@ class SHARPGaussianPipeline:
             gaussians = self._run_sharp(face_t, f_px)
             print(f"[SHARP-Direct] Face {face_idx+1}/{num_faces}: SHARP inference done in {time.time() - t0:.1f}s")
 
+            # --- Store front-layer depth map for SIFT matching ---
+            front_means_raw = gaussians.mean_vectors[0][:grid_size * grid_size]
+            face_depth_maps[face_idx] = (
+                front_means_raw.view(grid_size, grid_size, 3)
+                .norm(dim=-1).cpu().numpy()
+            )
+
             # --- Extract Gaussians (both layers) ---
-            grid_size = self.SHARP_INPUT_SIZE // 2  # 768
             means_cam, scales_cam, quats_cam, colors, opacities = (
                 self._unpack_gaussians(gaussians, grid_size)
             )
@@ -401,13 +812,14 @@ class SHARPGaussianPipeline:
             if self.device.type == 'cuda':
                 torch.cuda.empty_cache()
 
-            # --- Align depth to DAP ---
+            # --- Per-face DAP pre-alignment (initial scale estimate) ---
+            # This gives each face a rough scale to match DAP. The global
+            # solver will then fix inconsistencies between faces.
             t0 = time.time()
             means_cam, face_sf = self._align_to_dap(
                 means_cam, face_idx, dap_np, H, W, scales_cam
             )
             face_scale_factors.append(face_sf)
-            print(f"[SHARP-Direct] Face {face_idx+1}/{num_faces}: DAP alignment done in {time.time() - t0:.1f}s")
 
             # --- Grid jitter (break regular dot pattern) ---
             if grid_jitter > 0:
@@ -435,7 +847,12 @@ class SHARPGaussianPipeline:
 
             n_valid = means_cam.shape[0]
             if n_valid == 0:
-                print(f"[SHARP-Direct] Face {face_idx+1}/{num_faces}: 0 valid Gaussians, skipping")
+                print(f"[SHARP-Direct] Face {face_idx+1}/{num_faces}: 0 valid Gaussians")
+                all_means.append(torch.zeros(0, 3, device=self.device))
+                all_scales.append(torch.zeros(0, 3, device=self.device))
+                all_quats.append(torch.zeros(0, 4, device=self.device))
+                all_colors.append(torch.zeros(0, 3, device=self.device))
+                all_opacities.append(torch.zeros(0, device=self.device))
                 continue
 
             # --- Transform to world frame ---
@@ -446,43 +863,146 @@ class SHARPGaussianPipeline:
             quats_world = _quat_multiply(q_world, quats_cam)
             # Scales are invariant to rotation (eigen-values don't change)
 
-            # --- Nearest-face ownership (prevents double-coverage ghosting) ---
-            # Each Gaussian is assigned to exactly one face — the one whose
-            # center is closest to the Gaussian's direction.  Feathered
-            # blending was tried but creates ghosting because two faces
-            # produce DIFFERENT Gaussians at different positions; making
-            # both semi-transparent doesn't blend them, it doubles them.
-            own = _nearest_face_mask(
-                means_world, face_idx, all_face_forwards,
-            )
-
-            # --- Sky filter ---
-            dist = means_world.norm(dim=-1)
-            if sky_threshold > 0:
-                keep = own & (dist < sky_threshold)
-            else:
-                keep = own  # sky_threshold=0 disables sky filtering
-            means_world = means_world[keep]
-            scales_cam = scales_cam[keep]
-            quats_world = quats_world[keep]
-            colors = colors[keep]
-            opacities = opacities[keep]
-
-            n_kept = means_world.shape[0]
-            print(f"[SHARP-Direct] Face {face_idx+1}/{num_faces}: {n_valid:,} valid -> {n_kept:,} after ownership+sky ({time.time() - t_face:.1f}s)")
+            print(f"[SHARP-Direct] Face {face_idx+1}/{num_faces}: {n_valid:,} valid Gaussians ({time.time() - t_face:.1f}s)")
 
             all_means.append(means_world)
             all_scales.append(scales_cam)
             all_quats.append(quats_world)
             all_colors.append(colors)
             all_opacities.append(opacities)
+
+        # --- Clamp DAP outliers (fix sky/degenerate faces) ---
+        # Per-face DAP alignment gives wildly different scales (e.g. 3x ground
+        # vs 20x sky). Only clamp OUTLIER faces (>2x from median) — don't
+        # normalize all faces, since legitimate depth differences exist.
+        if len(face_scale_factors) > 1 and len(all_means) > 1:
+            sf = np.array(face_scale_factors)
+            # Robust median excluding clamped values
+            non_clamped = sf[sf < 19.9]
+            if len(non_clamped) >= 2:
+                target_scale = float(np.median(non_clamped))
+            else:
+                target_scale = float(np.median(sf))
+
+            print(f"[SHARP-Direct] DAP scale factors: "
+                  f"[{', '.join(f'{s:.2f}' for s in sf)}]")
+            print(f"[SHARP-Direct] Median DAP scale (non-clamped): {target_scale:.2f}")
+
+            # Only correct faces that are >2x away from median
+            for i in range(len(all_means)):
+                if i >= len(sf):
+                    continue
+                ratio = sf[i] / target_scale
+                if ratio > 2.0:
+                    # Scale too large — clamp down to 2x median
+                    c = (target_scale * 2.0) / sf[i]
+                    all_means[i] = all_means[i] * c
+                    all_scales[i] = all_scales[i] * c
+                    print(f"[SHARP-Direct]   Face {i}: clamped from {sf[i]:.2f}x to "
+                          f"{sf[i]*c:.2f}x (correction={c:.3f})")
+                elif ratio < 0.5:
+                    # Scale too small — clamp up to 0.5x median
+                    c = (target_scale * 0.5) / sf[i]
+                    all_means[i] = all_means[i] * c
+                    all_scales[i] = all_scales[i] * c
+                    print(f"[SHARP-Direct]   Face {i}: clamped from {sf[i]:.2f}x to "
+                          f"{sf[i]*c:.2f}x (correction={c:.3f})")
+
+        # --- Pairwise overlap alignment (fine-tune using SHARP-to-SHARP) ---
+        # After DAP outlier clamping, remaining face-to-face differences are
+        # typically 10-50%. The global solver fixes these using SHARP-to-SHARP
+        # comparison in overlap zones. Exclude unreliable faces (sky/clamped)
+        # since their contradictory overlap measurements poison the system.
+        unreliable_faces = set()
+        if len(face_scale_factors) > 1:
+            sf = np.array(face_scale_factors)
+            for i, s in enumerate(sf):
+                if s >= 19.9:  # hit safety clamp = unreliable
+                    unreliable_faces.add(i)
+
+        # --- SIFT feature-point matching for pairwise depth ratios ---
+        # Compute effective scale factors (accounting for DAP outlier clamping)
+        effective_sf = list(face_scale_factors)
+        if len(face_scale_factors) > 1 and len(all_means) > 1:
+            sf = np.array(face_scale_factors)
+            non_clamped = sf[sf < 19.9]
+            target_scale = float(np.median(non_clamped)) if len(non_clamped) >= 2 else float(np.median(sf))
+            for i in range(min(len(effective_sf), len(all_means))):
+                ratio = sf[i] / target_scale
+                if ratio > 2.0:
+                    effective_sf[i] = target_scale * 2.0
+                elif ratio < 0.5:
+                    effective_sf[i] = target_scale * 0.5
+
+        sift_ratios = None
+        if len(all_means) > 1 and face_depth_maps:
+            print(f"[SHARP-Direct] Running SIFT feature matching...")
+            t0 = time.time()
+            sift_ratios = _feature_match_pairwise_ratios(
+                faces_list, face_depth_maps, effective_sf,
+                self.cubemap_size, grid_size,
+                self.projector.face_fov, all_face_forwards,
+                exclude_faces=unreliable_faces,
+            )
+            print(f"[SHARP-Direct] SIFT matching done in {time.time() - t0:.1f}s "
+                  f"({len(sift_ratios) if sift_ratios else 0} pairs)")
+
+        if len(all_means) > 1:
+            print(f"[SHARP-Direct] Running pairwise overlap alignment...")
+            t0 = time.time()
+            _global_scale_alignment(
+                all_means, all_scales, all_face_forwards,
+                self.projector.face_fov,
+                dap_depth_np=dap_np, erp_H=H, erp_W=W,
+                exclude_faces=unreliable_faces,
+                feature_ratios=sift_ratios,
+            )
+            print(f"[SHARP-Direct] Pairwise alignment done in {time.time() - t0:.1f}s")
+
+        # --- Apply Voronoi ownership + sky filter per face ---
+        owned_means = []
+        owned_scales = []
+        owned_quats = []
+        owned_colors = []
+        owned_opacities = []
+        all_face_labels = []
+
+        for face_idx in range(len(all_means)):
+            means_world = all_means[face_idx]
+            scales_cam = all_scales[face_idx]
+            quats_world = all_quats[face_idx]
+            colors = all_colors[face_idx]
+            opacities = all_opacities[face_idx]
+
+            own = _nearest_face_mask(
+                means_world, face_idx, all_face_forwards,
+            )
+            dist = means_world.norm(dim=-1)
+            if sky_threshold > 0:
+                keep = own & (dist < sky_threshold)
+            else:
+                keep = own
+
+            owned_means.append(means_world[keep])
+            owned_scales.append(scales_cam[keep])
+            owned_quats.append(quats_world[keep])
+            owned_colors.append(colors[keep])
+            owned_opacities.append(opacities[keep])
             all_face_labels.append(
-                torch.full((means_world.shape[0],), face_idx,
+                torch.full((keep.sum().item(),), face_idx,
                            dtype=torch.long, device=means_world.device)
             )
+            print(f"[SHARP-Direct] Face {face_idx+1}/{num_faces}: {means_world.shape[0]:,} -> {keep.sum().item():,} after ownership+sky")
+
+        # Replace lists with owned versions
+        all_means = owned_means
+        all_scales = owned_scales
+        all_quats = owned_quats
+        all_colors = owned_colors
+        all_opacities = owned_opacities
 
         # --- Merge faces ---
-        if not all_means:
+        if not all_means or all(m.shape[0] == 0 for m in all_means):
             print("[SHARP-Direct] WARNING: No faces produced valid Gaussians.")
             return {
                 'means': torch.zeros((0, 3), device=self.device),
@@ -501,35 +1021,31 @@ class SHARPGaussianPipeline:
         total_gaussians = means.shape[0]
         print(f"[SHARP-Direct] Merged: {total_gaussians:,} total Gaussians")
 
-        # --- Overlap-based scale alignment ---
-        # Per-face DAP alignment gives each face a scale factor, but these
-        # can diverge wildly (e.g. 3.8x for ground vs 20x for sky).
-        # Instead of trusting DAP, use SHARP's own overlap zones: where two
-        # faces see the same scene geometry, compare their radial distances
-        # to compute relative scale corrections. This is SHARP-to-SHARP
-        # comparison — far more reliable than SHARP-to-DAP.
+        # --- Spatially-varying overlap corrections ---
+        # After global alignment, remaining local depth variation is handled
+        # by a per-Gaussian correction field built from seam-zone comparisons.
         face_labels = torch.cat(all_face_labels, dim=0)
         if len(face_scale_factors) > 1:
-            print(f"[SHARP-Direct] DAP scale factors: "
-                  f"[{', '.join(f'{s:.2f}' for s in face_scale_factors)}]")
-
             t0 = time.time()
             corrections = self._overlap_scale_corrections(
                 means, face_labels, all_face_forwards, num_faces,
             )
-            print(f"[SHARP-Direct] Overlap alignment: corrections="
-                  f"[{', '.join(f'{c:.3f}' for c in corrections)}] "
-                  f"({time.time() - t0:.1f}s)")
+            # corrections is now per-Gaussian [N] array
+            corr_t = torch.from_numpy(corrections).float().to(means.device)
+            adjusted = (corr_t - 1.0).abs() > 0.005
+            if adjusted.any():
+                means[adjusted] *= corr_t[adjusted].unsqueeze(-1)
+                scales[adjusted] *= corr_t[adjusted].unsqueeze(-1)
+            print(f"[SHARP-Direct] Overlap alignment done ({time.time() - t0:.1f}s)")
 
-            for fi in range(num_faces):
-                if abs(corrections[fi] - 1.0) > 0.005:
-                    mask = face_labels == fi
-                    n_affected = mask.sum().item()
-                    if n_affected > 0:
-                        means[mask] *= corrections[fi]
-                        scales[mask] *= corrections[fi]
-                        print(f"[SHARP-Direct]   Face {fi}: x{corrections[fi]:.3f} "
-                              f"({n_affected:,} Gaussians)")
+        # --- Soft geometric transition at seam boundaries ---
+        if len(all_face_labels) > 1:
+            print(f"[SHARP-Direct] Running seam geometry smoothing...", flush=True)
+            t0 = time.time()
+            means = self._smooth_seam_geometry(
+                means, face_labels, all_face_forwards,
+            )
+            print(f"[SHARP-Direct] Seam geometry smoothing done in {time.time() - t0:.1f}s")
 
         # --- Post-merge seam color smoothing ---
         if len(all_face_labels) > 1:
@@ -705,59 +1221,55 @@ class SHARPGaussianPipeline:
         all_face_forwards: List[np.ndarray],
         num_faces: int,
     ) -> np.ndarray:
-        """Compute per-face scale corrections from overlap zone geometry.
+        """Compute spatially-varying per-Gaussian scale corrections from overlap zones.
 
-        In the seam band near face boundaries, adjacent faces see the same
-        scene content.  Comparing radial distances in these shared zones gives
-        direct SHARP-to-SHARP scale ratios, which are more reliable than
-        per-face DAP alignment (DAP can give wildly different scales for
-        sky/ground faces).
-
-        Inspired by Ruben Frosali's approach: use splat density in overlap
-        regions to estimate relative scale corrections.
+        Instead of a single scalar per face, builds a correction field on a
+        spherical grid by comparing radial depths where adjacent faces overlap.
+        Each Gaussian gets a locally-interpolated correction factor, fixing
+        spatially-varying depth misalignment (e.g. ground vs sky within one face).
 
         Returns:
-            np.ndarray [num_faces] — multiplicative corrections, mean=1.0
+            np.ndarray [N] — per-Gaussian multiplicative correction factors
         """
         N = means.shape[0]
         if N < 100 or num_faces < 2:
-            return np.ones(num_faces)
+            return np.ones(N)
 
         dirs = F.normalize(means, dim=-1).cpu().numpy()
         labels_np = face_labels.cpu().numpy()
         dists = means.norm(dim=-1).cpu().numpy()
 
-        # Find seam-zone Gaussians (near Voronoi boundaries)
+        # --- Identify seam-zone Gaussians ---
         fwd_stack = np.stack(all_face_forwards, axis=0)  # [F, 3]
         cos_angles = dirs @ fwd_stack.T  # [N, F]
         top2_idx = np.argpartition(-cos_angles, 2, axis=1)[:, :2]
         cos_top2 = np.take_along_axis(cos_angles, top2_idx, axis=1)
         cos_1st = cos_top2.max(axis=1)
         cos_2nd = cos_top2.min(axis=1)
-        margin = cos_1st - cos_2nd  # guaranteed >= 0
-        seam_mask = margin < 0.15
+        margin = cos_1st - cos_2nd
+        seam_mask = margin < 0.20  # wider band for better spatial coverage
         seam_idx = np.where(seam_mask)[0]
 
         if len(seam_idx) < 100:
-            return np.ones(num_faces)
+            return np.ones(N)
 
         seam_labels = labels_np[seam_idx]
         seam_dists = dists[seam_idx]
         seam_dirs = dirs[seam_idx]
 
-        # Bin by direction on a coarse equirectangular grid
+        # --- Bin seam Gaussians on spherical grid ---
+        grid_res = 128  # higher res for spatially-varying correction
+        grid_cols = grid_res * 2
+        num_cells = grid_res * grid_cols
+
         x, y, z = seam_dirs[:, 0], seam_dirs[:, 1], seam_dirs[:, 2]
         phi = np.arccos(np.clip(y, -1, 1))
         theta = np.arctan2(-z, x) % (2 * np.pi)
-        grid_res = 64
         row = (phi / np.pi * (grid_res - 1)).clip(0, grid_res - 1).astype(np.int32)
-        col = (theta / (2 * np.pi) * (grid_res * 2 - 1)).clip(
-            0, grid_res * 2 - 1
-        ).astype(np.int32)
-        cell_id = row * grid_res * 2 + col
-        num_cells = grid_res * grid_res * 2
+        col = (theta / (2 * np.pi) * (grid_cols - 1)).clip(0, grid_cols - 1).astype(np.int32)
+        cell_id = row * grid_cols + col
 
-        # Per-face, per-cell distance accumulation (vectorized scatter-add)
+        # Per-face, per-cell distance accumulation
         combined_key = seam_labels * num_cells + cell_id
         max_key = num_faces * num_cells
 
@@ -766,46 +1278,300 @@ class SHARPGaussianPipeline:
         np.add.at(dist_sum, combined_key, seam_dists)
         np.add.at(dist_count, combined_key, 1)
 
-        has_data = dist_count > 0
-        dist_mean = np.zeros(max_key, dtype=np.float64)
-        dist_mean[has_data] = dist_sum[has_data] / dist_count[has_data]
-
-        dist_mean_2d = dist_mean.reshape(num_faces, num_cells)
+        dist_mean_2d = np.zeros((num_faces, num_cells), dtype=np.float64)
         cell_count_2d = dist_count.reshape(num_faces, num_cells)
+        has_data = cell_count_2d > 0
+        dist_mean_2d[has_data] = dist_sum.reshape(num_faces, num_cells)[has_data] / cell_count_2d[has_data]
 
-        # Find cells where 2+ faces contribute data
-        multi_face = (cell_count_2d > 0).sum(axis=0) >= 2
-        n_multi = multi_face.sum()
-        if n_multi < 10:
-            return np.ones(num_faces)
+        # --- Build per-face correction grid ---
+        # For each cell with 2+ faces, compute ratio of global mean to face mean
+        faces_per_cell = (cell_count_2d > 0).sum(axis=0)
+        multi_face = faces_per_cell >= 2
 
-        # Global mean distance per cell (weighted by Gaussian count)
+        # Global mean per cell (count-weighted average across faces)
         total_count = cell_count_2d.sum(axis=0).astype(np.float64)
-        total_dist = np.zeros(num_cells, dtype=np.float64)
-        for fi in range(num_faces):
-            total_dist += dist_sum.reshape(num_faces, num_cells)[fi]
+        total_dist = dist_sum.reshape(num_faces, num_cells).sum(axis=0)
         global_mean = np.zeros(num_cells, dtype=np.float64)
         has_any = total_count > 0
         global_mean[has_any] = total_dist[has_any] / total_count[has_any]
 
-        # Per-face correction: median ratio of global_mean / face_mean
-        corrections = np.ones(num_faces, dtype=np.float64)
+        # Per-face correction grid: ratio at each cell
+        correction_grid = np.ones((num_faces, grid_res, grid_cols), dtype=np.float64)
+        has_correction = np.zeros((num_faces, grid_res, grid_cols), dtype=bool)
+
         for fi in range(num_faces):
-            fi_in_multi = (cell_count_2d[fi] > 0) & multi_face
-            fi_cells = np.where(fi_in_multi)[0]
-            if len(fi_cells) < 5:
+            fi_cells = (cell_count_2d[fi] > 0) & multi_face
+            cells = np.where(fi_cells)[0]
+            if len(cells) < 3:
                 continue
-            ratios = global_mean[fi_cells] / dist_mean_2d[fi, fi_cells]
-            valid_ratios = ratios[(ratios > 0.01) & (ratios < 100)]
-            if len(valid_ratios) < 3:
+            ratios = global_mean[cells] / dist_mean_2d[fi, cells]
+            valid = (ratios > 0.1) & (ratios < 10.0)
+            cells = cells[valid]
+            ratios = ratios[valid]
+            if len(cells) < 3:
                 continue
-            corrections[fi] = float(np.exp(np.median(np.log(valid_ratios))))
+            cell_rows = cells // grid_cols
+            cell_cols = cells % grid_cols
+            correction_grid[fi, cell_rows, cell_cols] = ratios
+            has_correction[fi, cell_rows, cell_cols] = True
 
-        # Normalize: preserve overall scene scale (mean correction = 1.0)
-        log_mean = np.mean(np.log(corrections))
-        corrections /= np.exp(log_mean)
+        # --- Smooth the correction grids with Gaussian blur ---
+        # This fills gaps and creates smooth spatial transitions
+        from scipy.ndimage import gaussian_filter
+        sigma = 4.0  # smoothing radius in grid cells
 
-        return corrections
+        for fi in range(num_faces):
+            if not has_correction[fi].any():
+                continue
+            # Weighted smoothing: only spread from cells that have data
+            weight = has_correction[fi].astype(np.float64)
+            # Log-domain smoothing for multiplicative corrections
+            log_corr = np.log(correction_grid[fi])
+            log_corr[~has_correction[fi]] = 0.0
+
+            smoothed_num = gaussian_filter(log_corr * weight, sigma=sigma, mode='wrap')
+            smoothed_den = gaussian_filter(weight, sigma=sigma, mode='wrap')
+
+            valid_smooth = smoothed_den > 0.01
+            correction_grid[fi][valid_smooth] = np.exp(
+                smoothed_num[valid_smooth] / smoothed_den[valid_smooth]
+            )
+            correction_grid[fi][~valid_smooth] = 1.0
+
+        # --- Normalize correction grids (preserve scene scale) ---
+        # Compute weighted mean correction across all faces and cells
+        all_log_corr = []
+        for fi in range(num_faces):
+            fi_mask = labels_np == fi
+            if fi_mask.sum() == 0:
+                continue
+            all_log_corr.append(np.log(correction_grid[fi]).mean())
+        if all_log_corr:
+            log_bias = np.mean(all_log_corr)
+            for fi in range(num_faces):
+                correction_grid[fi] = np.exp(np.log(correction_grid[fi]) - log_bias)
+
+        # --- Sample correction for every Gaussian (not just seam) ---
+        all_dirs = dirs  # [N, 3]
+        ax, ay, az = all_dirs[:, 0], all_dirs[:, 1], all_dirs[:, 2]
+        all_phi = np.arccos(np.clip(ay, -1, 1))
+        all_theta = np.arctan2(-az, ax) % (2 * np.pi)
+        all_row = (all_phi / np.pi * (grid_res - 1)).clip(0, grid_res - 1).astype(np.int32)
+        all_col = (all_theta / (2 * np.pi) * (grid_cols - 1)).clip(0, grid_cols - 1).astype(np.int32)
+
+        per_gaussian_correction = np.ones(N, dtype=np.float64)
+        for fi in range(num_faces):
+            fi_mask = labels_np == fi
+            if fi_mask.sum() == 0:
+                continue
+            per_gaussian_correction[fi_mask] = correction_grid[fi, all_row[fi_mask], all_col[fi_mask]]
+
+        # Safety clamp
+        per_gaussian_correction = np.clip(per_gaussian_correction, 0.3, 3.0)
+
+        n_adjusted = np.sum(np.abs(per_gaussian_correction - 1.0) > 0.005)
+        print(f"[SHARP-Direct]   Spatially-varying correction: {n_adjusted:,}/{N:,} Gaussians adjusted")
+
+        return per_gaussian_correction
+
+    def _smooth_seam_geometry(
+        self,
+        means: torch.Tensor,
+        face_labels: torch.Tensor,
+        all_face_forwards: List[np.ndarray],
+        smooth_strength: float = 0.8,
+        grid_res: int = 64,
+    ) -> torch.Tensor:
+        """Smooth positions near face Voronoi boundaries to reduce geometric seams.
+
+        For Gaussians in the seam band, computes the average radial depth from
+        neighboring faces in the same angular bin, then blends the Gaussian's
+        radial distance toward that average. The direction is preserved — only
+        the depth changes. This eliminates "step" artifacts at face boundaries
+        without causing ghosting (no opacity change, no doubled geometry).
+
+        Args:
+            means: [N, 3] world positions
+            face_labels: [N] face index per Gaussian
+            all_face_forwards: list of face forward vectors
+            smooth_strength: blend factor toward cross-face depth (0-1)
+            grid_res: resolution of the spherical binning grid
+        """
+        if smooth_strength <= 0 or means.shape[0] == 0:
+            return means
+
+        N = means.shape[0]
+        num_faces = len(all_face_forwards)
+        device = means.device
+
+        dirs_np = F.normalize(means, dim=-1).cpu().numpy()
+        labels_np = face_labels.cpu().numpy()
+        dists_np = means.norm(dim=-1).cpu().numpy()
+
+        # Find seam-zone Gaussians
+        fwd_stack = np.stack(all_face_forwards, axis=0)
+        cos_angles = dirs_np @ fwd_stack.T
+        top2_idx = np.argpartition(-cos_angles, 2, axis=1)[:, :2]
+        cos_top2 = np.take_along_axis(cos_angles, top2_idx, axis=1)
+        margin = cos_top2.max(axis=1) - cos_top2.min(axis=1)
+
+        seam_threshold = 0.25  # wider band for better cross-face coverage
+        seam_mask = margin < seam_threshold
+        seam_idx = np.where(seam_mask)[0]
+
+        if len(seam_idx) < 10:
+            return means
+
+        # Bin seam Gaussians on ERP grid
+        grid_cols = grid_res * 2
+        num_cells = grid_res * grid_cols
+
+        seam_dirs = dirs_np[seam_idx]
+        seam_labels = labels_np[seam_idx]
+        seam_dists = dists_np[seam_idx]
+
+        x, y, z = seam_dirs[:, 0], seam_dirs[:, 1], seam_dirs[:, 2]
+        phi = np.arccos(np.clip(y, -1, 1))
+        theta = np.arctan2(-z, x) % (2 * np.pi)
+        row = (phi / np.pi * (grid_res - 1)).clip(0, grid_res - 1).astype(np.int32)
+        col = (theta / (2 * np.pi) * (grid_cols - 1)).clip(0, grid_cols - 1).astype(np.int32)
+        cell_id = row * grid_cols + col
+
+        # Per-cell, per-face distance accumulation
+        # Layout: (num_faces, num_cells) so face_dist[fi, cell] works correctly
+        combined_key = seam_labels * num_cells + cell_id
+        max_key = num_faces * num_cells
+
+        dist_sum = np.zeros(max_key, dtype=np.float64)
+        dist_count = np.zeros(max_key, dtype=np.int32)
+        np.add.at(dist_sum, combined_key, seam_dists)
+        np.add.at(dist_count, combined_key, 1)
+
+        # Total per cell (all faces)
+        cell_total_sum = np.zeros(num_cells, dtype=np.float64)
+        cell_total_count = np.zeros(num_cells, dtype=np.int32)
+        np.add.at(cell_total_sum, cell_id, seam_dists)
+        np.add.at(cell_total_count, cell_id, 1)
+
+        # Cross-face average depth per seam Gaussian
+        same_key = combined_key
+        same_sum = dist_sum[same_key]
+        same_count = dist_count[same_key]
+
+        cross_sum = cell_total_sum[cell_id] - same_sum
+        cross_count = cell_total_count[cell_id] - same_count
+
+        has_cross = cross_count > 0
+        if not has_cross.any():
+            return means
+
+        cross_avg_dist = np.zeros(len(seam_idx), dtype=np.float64)
+        cross_avg_dist[has_cross] = cross_sum[has_cross] / cross_count[has_cross]
+
+        # Build per-face correction field on spherical grid, then smooth
+        # to cover Gaussians that lack direct cross-face data in their cell.
+        from scipy.ndimage import gaussian_filter
+
+        face_correction_ratio = np.ones((num_faces, grid_res, grid_cols), dtype=np.float64)
+        has_ratio = np.zeros((num_faces, grid_res, grid_cols), dtype=bool)
+
+        # Per-face mean depth per cell
+        face_dist = dist_sum.reshape(num_faces, num_cells)
+        face_count = dist_count.reshape(num_faces, num_cells)
+
+        for fi in range(num_faces):
+            fi_seam = seam_labels == fi
+            if fi_seam.sum() == 0:
+                continue
+            fi_cells = cell_id[fi_seam]
+            fi_dists = seam_dists[fi_seam]
+            fi_cross_sum = cell_total_sum[fi_cells] - face_dist[fi, fi_cells].clip(0)
+            fi_cross_cnt = cell_total_count[fi_cells] - face_count[fi, fi_cells].clip(0)
+            fi_has_cross = fi_cross_cnt > 0
+            if not fi_has_cross.any():
+                continue
+            fi_cross_avg = np.zeros(fi_seam.sum(), dtype=np.float64)
+            fi_cross_avg[fi_has_cross] = fi_cross_sum[fi_has_cross] / fi_cross_cnt[fi_has_cross]
+
+            # Compute ratio: cross-face avg / own depth
+            fi_own_valid = (fi_dists > 0.1) & fi_has_cross & (fi_cross_avg > 0.1)
+            if fi_own_valid.sum() == 0:
+                continue
+            ratios = fi_cross_avg[fi_own_valid] / fi_dists[fi_own_valid]
+            ratio_cells = fi_cells[fi_own_valid]
+            ratio_rows = ratio_cells // grid_cols
+            ratio_cols = ratio_cells % grid_cols
+
+            # Store ratios in grid (use median per cell for robustness)
+            unique_cells = np.unique(ratio_cells)
+            for uc in unique_cells:
+                uc_mask = ratio_cells == uc
+                r_median = np.median(ratios[uc_mask])
+                if 0.2 < r_median < 5.0:
+                    rr, rc = uc // grid_cols, uc % grid_cols
+                    face_correction_ratio[fi, rr, rc] = r_median
+                    has_ratio[fi, rr, rc] = True
+
+        # Smooth the correction fields to fill gaps (key improvement)
+        sigma_smooth = 5.0  # ~14° smoothing radius
+        for fi in range(num_faces):
+            if not has_ratio[fi].any():
+                continue
+            weight = has_ratio[fi].astype(np.float64)
+            log_r = np.log(face_correction_ratio[fi])
+            log_r[~has_ratio[fi]] = 0.0
+            sm_num = gaussian_filter(log_r * weight, sigma=sigma_smooth, mode='wrap')
+            sm_den = gaussian_filter(weight, sigma=sigma_smooth, mode='wrap')
+            valid = sm_den > 0.01
+            face_correction_ratio[fi][valid] = np.exp(sm_num[valid] / sm_den[valid])
+            face_correction_ratio[fi][~valid] = 1.0
+
+        # Sample smoothed correction for each seam Gaussian
+        seam_corrections = np.ones(len(seam_idx), dtype=np.float64)
+        for fi in range(num_faces):
+            fi_mask = seam_labels == fi
+            if fi_mask.sum() == 0:
+                continue
+            fi_rows = row[fi_mask]
+            fi_cols = col[fi_mask]
+            seam_corrections[fi_mask] = face_correction_ratio[fi, fi_rows, fi_cols]
+
+        # Blend weight: stronger near boundary (small margin)
+        margin_seam = margin[seam_idx]
+        blend = (1.0 - margin_seam / seam_threshold).clip(0, 1) * smooth_strength
+
+        # Compute new radial distance
+        target_dist = seam_dists * seam_corrections
+        new_dist = (1 - blend) * seam_dists + blend * target_dist
+
+        # Apply: scale position along its direction
+        scale_ratio = np.ones(len(seam_idx), dtype=np.float64)
+        nonzero = seam_dists > 0.01
+        scale_ratio[nonzero] = new_dist[nonzero] / seam_dists[nonzero]
+
+        # Safety clamp
+        scale_ratio = np.clip(scale_ratio, 0.3, 3.0)
+
+        # Build full-size correction array
+        result = means.clone()
+        seam_idx_t = torch.from_numpy(seam_idx).long().to(device)
+        ratio_t = torch.from_numpy(scale_ratio).float().to(device)
+
+        adjusted_mask = (ratio_t - 1.0).abs() > 0.001
+        if adjusted_mask.any():
+            idx = seam_idx_t[adjusted_mask]
+            r = ratio_t[adjusted_mask].unsqueeze(-1)
+            result[idx] = result[idx] * r
+
+        n_adjusted = adjusted_mask.sum().item()
+        if n_adjusted > 0:
+            avg_shift = np.abs(scale_ratio[adjusted_mask.cpu().numpy()] - 1.0).mean() * 100
+        else:
+            avg_shift = 0.0
+        print(f"[SHARP-Direct]   Seam geometry: {n_adjusted:,}/{len(seam_idx):,} seam Gaussians adjusted "
+              f"(avg shift: {avg_shift:.1f}%)")
+
+        return result
 
     def _smooth_seam_colors(
         self,

@@ -289,7 +289,7 @@ class CubemapProjector(BaseProjector):
         np.array([0, 1, 0]),   # -Z
     ]
     
-    def __init__(self, face_size: int, device: torch.device, overlap_ratio: float = 0.4):
+    def __init__(self, face_size: int, device: torch.device, overlap_ratio: float = 0.55):
         super().__init__(face_size, device)
         self.overlap_ratio = overlap_ratio
 
