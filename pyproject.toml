@@ -1,6 +1,6 @@
 [project]
 name = "spag4d"
-version = "0.2.0"
+version = "2.0.0"
 description = "Convert 360° equirectangular panoramas to 3D Gaussian Splats"
 readme = "README.md"
 license = {text = "MIT"}
@@ -68,10 +68,10 @@ dev = [
 spag4d = "spag4d.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/your-org/spag-4d"
-Documentation = "https://github.com/your-org/spag-4d#readme"
-Repository = "https://github.com/your-org/spag-4d"
-Issues = "https://github.com/your-org/spag-4d/issues"
+Homepage = "https://github.com/cedarconnor/SPAG4d"
+Documentation = "https://github.com/cedarconnor/SPAG4d#readme"
+Repository = "https://github.com/cedarconnor/SPAG4d"
+Issues = "https://github.com/cedarconnor/SPAG4d/issues"
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]

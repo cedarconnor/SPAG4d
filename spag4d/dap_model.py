@@ -195,8 +195,8 @@ class DAPModel:
             image = image.float() / 255.0
         
         # DAP expects [B, C, H, W] normalized with ImageNet stats
-        x = image.permute(0, 3, 1, 2)  # [B, 3, H, W]
-        
+        x = image.permute(0, 3, 1, 2).to(self.device)  # [B, 3, H, W]
+
         mean = torch.tensor([0.485, 0.456, 0.406], device=self.device).view(1, 3, 1, 1)
         std = torch.tensor([0.229, 0.224, 0.225], device=self.device).view(1, 3, 1, 1)
         x = (x - mean) / std

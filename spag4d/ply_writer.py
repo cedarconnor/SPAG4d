@@ -13,6 +13,15 @@ from typing import Optional
 SH_C0 = 0.28209479177387814
 
 
+def _linearRGB_to_sRGB(linear: np.ndarray) -> np.ndarray:
+    """IEC 61966-2-1 sRGB OETF, matching Apple Metal Spec 7.7.7."""
+    return np.where(
+        linear <= 0.0031308,
+        linear * 12.92,
+        1.055 * np.clip(linear, 0.0031308, None) ** (1.0 / 2.4) - 0.055
+    )
+
+
 def save_ply_gsplat(
     gaussians: dict,
     path: str,
@@ -49,15 +58,8 @@ def save_ply_gsplat(
     if N == 0:
         raise ValueError("No valid Gaussians to save")
     
-    # ─────────────────────────────────────────────────────────────────
-    # Coordinate Transform: 
-    # Internal is Y-up. Many viewers expect different conventions.
-    # Negate Y to flip orientation for correct display.
-    # ─────────────────────────────────────────────────────────────────
-    means_out = means.copy()
-    means_out[:, 1] = -means[:, 1]  # Flip Y
-    
-    # Quaternions are already in correct orientation relative to means
+    # Coordinate system: Y-up (OpenGL convention) — no transform needed.
+    means_out = means
     quats_out = quats
 
     
@@ -68,10 +70,11 @@ def save_ply_gsplat(
     # Scales: log-space
     log_scales = np.log(np.clip(scales, 1e-7, None))
     
-    # Colors: SH DC coefficients
-    # Convention: f_dc = (color - 0.5) / SH_C0
-    # This maps [0,1] → [-1.77, 1.77] centered at 0
-    sh_dc = (colors - 0.5) / SH_C0
+    # Colors: linearRGB -> sRGB, then SH DC coefficients
+    # SHARP outputs linearRGB; standard 3DGS renderers expect sRGB in SH0.
+    # Matches Apple's save_ply() conversion path.
+    colors_srgb = _linearRGB_to_sRGB(np.clip(colors, 0.0, 1.0))
+    sh_dc = (colors_srgb - 0.5) / SH_C0
     
     # Opacity: logit-space
     opacities_clamped = np.clip(opacities, 1e-6, 1 - 1e-6)

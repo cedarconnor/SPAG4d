@@ -246,7 +246,7 @@ def filter_gaussian_candidates(
     else:
         sky_mask_full = np.zeros((H, W), dtype=bool)
 
-    # Downsample sky mask to stride resolution (any sky pixel in cell → sky)
+    # Downsample sky mask to stride resolution (point-sampled at grid positions)
     sky_mask_strided = sky_mask_full[::stride, ::stride]
 
     # ── Pole thinning ──

@@ -15,15 +15,8 @@ if not exist "%PYTHON_EXE%" (
     exit /b 1
 )
 
-REM Kill any existing process on port 7860
-echo Checking for existing servers on port 7860...
-for /f "tokens=5" %%a in ('netstat -aon ^| findstr :7860 ^| findstr LISTENING 2^>nul') do (
-    echo Killing existing process PID: %%a
-    taskkill /F /PID %%a >nul 2>&1
-)
-
-echo.
 echo Starting web server on http://localhost:7860
+echo (any existing server on this port will be killed automatically)
 echo Press Ctrl+C to stop
 echo.
 

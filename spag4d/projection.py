@@ -78,7 +78,7 @@ class BaseProjector(ABC):
         # Build tangent plane coordinate system
         forward = center_dir / np.linalg.norm(center_dir)
         up = up_dir / np.linalg.norm(up_dir)
-        right = np.cross(forward, up)
+        right = np.cross(up, forward)
         right = right / np.linalg.norm(right)
         up = np.cross(right, forward)
         
@@ -114,7 +114,7 @@ class BaseProjector(ABC):
         phi = torch.acos(y.clamp(-1, 1))  # [0, π]
         
         # To normalized coords [-1, 1] for grid_sample
-        u_erp = (theta / (2 * math.pi)) * 2 - 1  # [0, 2π] -> [-1, 1]
+        u_erp = 1 - (theta / math.pi)  # theta=0 -> u_erp=1 (Right), theta=2pi -> u_erp=-1 (Left)
         v_erp = (phi / math.pi) * 2 - 1          # [0, π] -> [-1, 1]
         
         grid = torch.stack([u_erp, v_erp], dim=-1).unsqueeze(0)
@@ -186,7 +186,7 @@ class BaseProjector(ABC):
         # Build tangent plane coordinate system
         forward = center_dir / np.linalg.norm(center_dir)
         up = up_dir / np.linalg.norm(up_dir)
-        right = np.cross(forward, up)
+        right = np.cross(up, forward)
         right = right / np.linalg.norm(right)
         up = np.cross(right, forward)
         
@@ -195,7 +195,7 @@ class BaseProjector(ABC):
         v_erp = torch.linspace(0, 1, erp_h, device=self.device)
         uu, vv = torch.meshgrid(u_erp, v_erp, indexing='xy')
         
-        theta = uu * 2 * math.pi  # [0, 2π]
+        theta = (1 - uu) * 2 * math.pi  # uu=0 (Left) -> theta=2pi, uu=1 (Right) -> theta=0
         phi = vv * math.pi        # [0, π]
         
         # Spherical to Cartesian

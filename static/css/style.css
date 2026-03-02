@@ -212,6 +212,15 @@ body {
     background: var(--bg-secondary);
 }
 
+.sm-btn.danger {
+    color: var(--error);
+    border-color: var(--error);
+}
+
+.sm-btn.danger:hover {
+    background: rgba(239, 68, 68, 0.15);
+}
+
 .header-tabs {
     display: flex;
     gap: 1px;
