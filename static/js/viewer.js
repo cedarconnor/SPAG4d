@@ -18,8 +18,8 @@ export class Viewer {
         this.viewer = new GaussianSplats3D.Viewer({
             rootElement: this.container,
             cameraUp: [0, 1, 0],
-            initialCameraLookAt: [0, 0, 0],
-            initialCameraPosition: [0, 0, 5],
+            initialCameraLookAt: [0, 0, -1],
+            initialCameraPosition: [0, 0, 0],
             sharedMemoryForWorkers: false,
             dynamicScene: false,
         });
@@ -55,9 +55,24 @@ export class Viewer {
 
     resetView() {
         if (!this.viewer) return;
-        // Re-create viewer at default position
-        const url = this._lastUrl;
-        if (url) this.loadScene(url);
+        const camera = this.viewer.camera;
+        const controls = this.viewer.controls;
+        if (!camera) return;
+
+        // Use scene bounding box center as target if available, else origin
+        let cx = 0, cy = 0, cz = 0;
+        const splatMesh = this.viewer.splatMesh;
+        if (splatMesh && typeof splatMesh.getCenter === 'function') {
+            const center = splatMesh.getCenter();
+            cx = center.x; cy = center.y; cz = center.z;
+        }
+
+        camera.position.set(cx, cy, cz);
+        camera.up.set(0, 1, 0);
+        if (controls) {
+            controls.target.set(cx, cy, cz - 1);
+            controls.update();
+        }
     }
 
     dispose() {

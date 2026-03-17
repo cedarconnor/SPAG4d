@@ -378,6 +378,8 @@ def _global_scale_alignment(
     if dap_depth_np is not None and erp_H > 0:
         all_log_ratios = []
         for fi in range(num_faces):
+            if fi in exclude_faces:
+                continue
             pos = all_means_world[fi]
             if pos.shape[0] == 0:
                 continue
@@ -556,6 +558,641 @@ def _feature_match_pairwise_ratios(
     return results
 
 
+def _bilinear_sample_depth(depth_map: np.ndarray, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
+    """Bilinear interpolation of a 2D depth map at sub-pixel (row, col) coordinates."""
+    H, W = depth_map.shape
+    r0 = np.floor(rows).astype(np.int32).clip(0, H - 2)
+    c0 = np.floor(cols).astype(np.int32).clip(0, W - 2)
+    fr = (rows - r0).astype(np.float32)
+    fc = (cols - c0).astype(np.float32)
+    return (depth_map[r0, c0] * (1 - fr) * (1 - fc) +
+            depth_map[r0 + 1, c0] * fr * (1 - fc) +
+            depth_map[r0, c0 + 1] * (1 - fr) * fc +
+            depth_map[r0 + 1, c0 + 1] * fr * fc)
+
+
+def _direct_seam_depth_correction(
+    all_means: List[torch.Tensor],
+    all_scales: List[torch.Tensor],
+    face_depth_maps: Dict[int, np.ndarray],
+    face_rotations: List[tuple],
+    all_face_forwards: List[np.ndarray],
+    face_fov: float,
+    grid_size: int = 768,
+):
+    """Pre-Voronoi cross-face depth correction using per-face depth maps.
+
+    For seam Gaussians visible from an adjacent face, project their direction
+    into that face's camera, bilinear-sample the depth map, and nudge positions
+    toward the cross-face prediction.  This fixes geometric "steps" at face
+    boundaries before hard Voronoi ownership discards cross-face data.
+    """
+    num_faces = len(all_means)
+    if num_faces < 2 or not face_depth_maps:
+        return
+
+    device = all_means[0].device
+    f_grid = grid_size / (2 * math.tan(face_fov / 2))
+
+    # --- Step 1: Compute effective scale per face ---
+    # For each face, project Gaussians back into camera frame, sample raw depth,
+    # and compute the ratio of current (post-alignment) depth to raw depth.
+    effective_scale = {}
+    for fi in range(num_faces):
+        if fi not in face_depth_maps or all_means[fi].shape[0] == 0:
+            continue
+        R_cam = face_rotations[fi][0].cpu().numpy()  # camera->world
+        means_np = all_means[fi].cpu().numpy()
+        # world->camera for row vectors: p_cam = p_world @ R
+        p_cam = means_np @ R_cam
+        # Only use Gaussians in front of camera
+        front = p_cam[:, 2] > 0.01
+        if front.sum() < 100:
+            continue
+        p_front = p_cam[front]
+        cols = p_front[:, 0] / p_front[:, 2] * f_grid + grid_size / 2
+        rows = -p_front[:, 1] / p_front[:, 2] * f_grid + grid_size / 2
+        valid = (rows >= 0) & (rows < grid_size - 1) & (cols >= 0) & (cols < grid_size - 1)
+        if valid.sum() < 50:
+            continue
+        raw_depth = _bilinear_sample_depth(face_depth_maps[fi], rows[valid], cols[valid])
+        current_depth = np.linalg.norm(means_np[front][valid], axis=-1)
+        ratio = current_depth / np.maximum(raw_depth, 1e-6)
+        effective_scale[fi] = float(np.median(ratio))
+
+    if len(effective_scale) < 2:
+        print("[SHARP-Direct]   Seam correction: too few faces with effective scale, skipping")
+        return
+
+    # --- Step 2: Find adjacent pairs ---
+    fwd_stack = np.stack(all_face_forwards, axis=0)
+    cos_matrix = fwd_stack @ fwd_stack.T
+    adjacency_threshold = np.cos(face_fov * 0.8)
+
+    pairs = []
+    for i in range(num_faces):
+        for j in range(i + 1, num_faces):
+            if cos_matrix[i, j] > adjacency_threshold:
+                pairs.append((i, j))
+
+    if not pairs:
+        return
+
+    # --- Step 3: Per-Gaussian correction accumulator ---
+    # correction_sum[fi] and correction_weight[fi] are per-Gaussian accumulators
+    correction_sum = {}
+    correction_weight = {}
+    for fi in range(num_faces):
+        n = all_means[fi].shape[0]
+        correction_sum[fi] = np.zeros(n, dtype=np.float64)
+        correction_weight[fi] = np.zeros(n, dtype=np.float64)
+
+    for src, dst in pairs:
+        # Process both directions
+        for fi_src, fi_dst in [(src, dst), (dst, src)]:
+            if fi_dst not in face_depth_maps or fi_dst not in effective_scale:
+                continue
+            if all_means[fi_src].shape[0] == 0:
+                continue
+
+            R_dst = face_rotations[fi_dst][0].cpu().numpy()  # camera->world
+            means_np = all_means[fi_src].cpu().numpy()
+            # Project source Gaussians into dst camera: world->camera
+            d_cam = means_np @ R_dst  # row vectors @ R = world->cam
+            front = d_cam[:, 2] > 0.01
+            if front.sum() == 0:
+                continue
+
+            cols = d_cam[front, 0] / d_cam[front, 2] * f_grid + grid_size / 2
+            rows = -d_cam[front, 1] / d_cam[front, 2] * f_grid + grid_size / 2
+
+            valid = (rows >= 0) & (rows < grid_size - 1) & (cols >= 0) & (cols < grid_size - 1)
+            if valid.sum() == 0:
+                continue
+
+            # Bilinear sample dst depth map, scale by effective_scale
+            raw_depth = _bilinear_sample_depth(face_depth_maps[fi_dst], rows[valid], cols[valid])
+            predicted_depth = raw_depth * effective_scale[fi_dst]
+            current_depth = np.linalg.norm(means_np[front][valid], axis=-1)
+
+            # Log correction, clamped
+            safe_ratio = np.maximum(predicted_depth / np.maximum(current_depth, 1e-6), 1e-6)
+            log_corr = np.log(safe_ratio).clip(np.log(0.85), np.log(1.15))
+
+            # Weight by boundary proximity: only correct near the seam (outer 15% of face)
+            # Use distance from SRC face center in angular space
+            fwd_src = all_face_forwards[fi_src]
+            dirs = means_np[front][valid]
+            dirs_norm = dirs / (np.linalg.norm(dirs, axis=-1, keepdims=True) + 1e-8)
+            cos_angle = dirs_norm @ fwd_src  # 1.0 at center, decreasing toward edge
+            half_fov_cos = np.cos(face_fov * 0.5)
+            # Ramp from 0 at 85% of half-FOV to 1 at the face edge
+            edge_frac = (1.0 - cos_angle) / (1.0 - half_fov_cos + 1e-8)  # 0=center, 1=edge
+            boundary_weight = np.clip((edge_frac - 0.85) / 0.15, 0.0, 1.0)
+
+            # Map valid indices back to original face indices
+            front_idx = np.where(front)[0]
+            valid_idx = front_idx[valid]
+
+            correction_sum[fi_src][valid_idx] += log_corr * boundary_weight
+            correction_weight[fi_src][valid_idx] += boundary_weight
+
+    # --- Step 4: Apply corrections ---
+    total_corrected = 0
+    for fi in range(num_faces):
+        n = all_means[fi].shape[0]
+        if n == 0:
+            continue
+        w = correction_weight[fi]
+        has_correction = w > 0.01
+        n_corrected = has_correction.sum()
+        if n_corrected == 0:
+            continue
+
+        avg_log = correction_sum[fi][has_correction] / w[has_correction]
+        # Blend factor: only apply 25% of the correction to avoid over-shooting
+        avg_log *= 0.25
+        scale_factor = np.exp(avg_log).astype(np.float32)
+
+        # Apply to positions and scales
+        idx = torch.from_numpy(np.where(has_correction)[0]).to(device)
+        sf_tensor = torch.from_numpy(scale_factor).to(device)
+
+        all_means[fi][idx] = all_means[fi][idx] * sf_tensor.unsqueeze(-1)
+        all_scales[fi][idx] = all_scales[fi][idx] * sf_tensor.unsqueeze(-1)
+
+        avg_mag = float(np.mean(np.abs(avg_log)) * 100)
+        total_corrected += n_corrected
+        print(f"[SHARP-Direct]   Seam correction face {fi}: "
+              f"{n_corrected:,} Gaussians, avg magnitude {avg_mag:.1f}%")
+
+    print(f"[SHARP-Direct]   Seam correction total: {total_corrected:,} Gaussians adjusted")
+
+
+# ---------------------------------------------------------------------------
+# Spatially-varying overlap depth correction
+# ---------------------------------------------------------------------------
+
+def _spatially_varying_depth_correction(
+    all_means: List[torch.Tensor],
+    all_scales: List[torch.Tensor],
+    face_depth_maps: Dict[int, np.ndarray],
+    face_rotations: List[tuple],
+    all_face_forwards: List[np.ndarray],
+    face_fov: float,
+    grid_size: int = 768,
+    correction_grid_res: int = 64,
+    smooth_sigma: float = 3.0,
+    max_correction: float = 0.20,
+):
+    """Spatially-varying depth correction using cross-face depth map projection.
+
+    For each adjacent face pair, projects src Gaussians into dst's camera to
+    sample dst's depth map, computes log-ratio corrections, and bins them onto
+    a per-face 2D grid.  After Gaussian blur + edge fade, corrections are
+    applied per-Gaussian via bilinear sampling.  This fixes depth steps at
+    face boundaries while leaving face interiors untouched.
+    """
+    from scipy.ndimage import gaussian_filter
+
+    num_faces = len(all_means)
+    if num_faces < 2 or not face_depth_maps:
+        return
+
+    device = all_means[0].device
+    f_grid = grid_size / (2 * math.tan(face_fov / 2))
+
+    # --- A. Effective scale per face ---
+    # For each face, project its Gaussians into its own camera, sample its
+    # depth map, compute median(world_depth / raw_depth).
+    effective_scale = {}
+    for fi in range(num_faces):
+        if fi not in face_depth_maps or all_means[fi].shape[0] == 0:
+            continue
+        R_cam = face_rotations[fi][0].cpu().numpy()  # camera->world
+        means_np = all_means[fi].cpu().numpy()
+        # world->camera for row vectors: p_cam = p_world @ R
+        p_cam = means_np @ R_cam
+        front = p_cam[:, 2] > 0.01
+        if front.sum() < 100:
+            continue
+        p_front = p_cam[front]
+        cols = p_front[:, 0] / p_front[:, 2] * f_grid + grid_size / 2
+        rows = -p_front[:, 1] / p_front[:, 2] * f_grid + grid_size / 2
+        valid = (rows >= 0) & (rows < grid_size - 1) & (cols >= 0) & (cols < grid_size - 1)
+        if valid.sum() < 50:
+            continue
+        raw_depth = _bilinear_sample_depth(face_depth_maps[fi], rows[valid], cols[valid])
+        current_depth = np.linalg.norm(means_np[front][valid], axis=-1)
+        ratio = current_depth / np.maximum(raw_depth, 1e-6)
+        effective_scale[fi] = float(np.median(ratio))
+
+    if len(effective_scale) < 2:
+        print("[SpatialDepth] Too few faces with effective scale, skipping")
+        return
+
+    # --- B. Find adjacent face pairs ---
+    fwd_stack = np.stack(all_face_forwards, axis=0)
+    cos_matrix = fwd_stack @ fwd_stack.T
+    adjacency_threshold = np.cos(face_fov * 0.8)
+
+    pairs = []
+    for i in range(num_faces):
+        for j in range(i + 1, num_faces):
+            if cos_matrix[i, j] > adjacency_threshold and i in effective_scale and j in effective_scale:
+                pairs.append((i, j))
+
+    if not pairs:
+        print("[SpatialDepth] No adjacent pairs found, skipping")
+        return
+
+    print(f"[SpatialDepth] {len(pairs)} adjacent pairs, grid {correction_grid_res}x{correction_grid_res}")
+
+    # --- C. Build per-face correction grids ---
+    # Each face gets a correction_grid_res x correction_grid_res grid accumulating
+    # log-corrections from all neighbors.
+    grid_sum = {}
+    grid_weight = {}
+    for fi in range(num_faces):
+        grid_sum[fi] = np.zeros((correction_grid_res, correction_grid_res), dtype=np.float64)
+        grid_weight[fi] = np.zeros((correction_grid_res, correction_grid_res), dtype=np.float64)
+
+    for src, dst in pairs:
+        # Process both directions: src->dst and dst->src
+        for a, b in [(src, dst), (dst, src)]:
+            if a not in face_depth_maps or b not in face_depth_maps:
+                continue
+            if all_means[a].shape[0] == 0:
+                continue
+
+            R_a = face_rotations[a][0].cpu().numpy()  # a's camera->world
+            R_b = face_rotations[b][0].cpu().numpy()  # b's camera->world
+            means_np = all_means[a].cpu().numpy()
+
+            # Project a's Gaussians into b's camera
+            p_cam_b = means_np @ R_b  # world->camera_b
+            front_b = p_cam_b[:, 2] > 0.01
+            if front_b.sum() < 10:
+                continue
+
+            p_front_b = p_cam_b[front_b]
+            cols_b = p_front_b[:, 0] / p_front_b[:, 2] * f_grid + grid_size / 2
+            rows_b = -p_front_b[:, 1] / p_front_b[:, 2] * f_grid + grid_size / 2
+            in_b = ((rows_b >= 0) & (rows_b < grid_size - 1) &
+                    (cols_b >= 0) & (cols_b < grid_size - 1))
+            if in_b.sum() < 10:
+                continue
+
+            # Sample b's depth map, scale by effective_scale[b]
+            raw_depth_b = _bilinear_sample_depth(
+                face_depth_maps[b], rows_b[in_b], cols_b[in_b]
+            )
+            predicted_depth = raw_depth_b * effective_scale[b]
+
+            # Current world-space radial distance of a's Gaussians
+            current_depth = np.linalg.norm(means_np[front_b][in_b], axis=-1)
+
+            # Log correction: how much should a's depth change to match b's prediction
+            valid_depth = (predicted_depth > 1e-6) & (current_depth > 1e-6)
+            if valid_depth.sum() < 5:
+                continue
+
+            log_corr = np.log(predicted_depth[valid_depth] / current_depth[valid_depth])
+            log_corr = np.clip(log_corr, -max_correction, max_correction)
+
+            # Project these same Gaussians into a's OWN camera to get UV on a's grid
+            p_cam_a = means_np[front_b][in_b][valid_depth] @ R_a
+            in_front_a = p_cam_a[:, 2] > 0.01
+            if in_front_a.sum() < 5:
+                continue
+
+            cols_a = p_cam_a[in_front_a, 0] / p_cam_a[in_front_a, 2] * f_grid + grid_size / 2
+            rows_a = -p_cam_a[in_front_a, 1] / p_cam_a[in_front_a, 2] * f_grid + grid_size / 2
+
+            # Map pixel coords to correction grid cells
+            gc = cols_a / grid_size * correction_grid_res
+            gr = rows_a / grid_size * correction_grid_res
+            gc_i = np.floor(gc).astype(np.int32).clip(0, correction_grid_res - 1)
+            gr_i = np.floor(gr).astype(np.int32).clip(0, correction_grid_res - 1)
+
+            # Bin corrections onto a's grid
+            lc = log_corr[in_front_a]
+            np.add.at(grid_sum[a], (gr_i, gc_i), lc)
+            np.add.at(grid_weight[a], (gr_i, gc_i), 1.0)
+
+    # --- D. Smooth and fade ---
+    correction_fields = {}
+    for fi in range(num_faces):
+        w = grid_weight[fi]
+        if w.max() < 1.0:
+            continue  # no cross-face data for this face
+
+        # Weighted average in log domain
+        avg = np.zeros_like(grid_sum[fi])
+        has_data = w > 0.5
+        avg[has_data] = grid_sum[fi][has_data] / w[has_data]
+
+        # Gaussian blur — smooth the correction field and fill sparse areas
+        # Blur both the sum and weights, then divide (equivalent to weighted blur)
+        blurred_sum = gaussian_filter(grid_sum[fi], sigma=smooth_sigma)
+        blurred_weight = gaussian_filter(w, sigma=smooth_sigma)
+        smoothed = np.zeros_like(avg)
+        has_weight = blurred_weight > 0.1
+        smoothed[has_weight] = blurred_sum[has_weight] / blurred_weight[has_weight]
+
+        # Fade mask: full strength at edges, zero at center
+        # dist_from_center: 0 at center, 1 at edges
+        u = np.linspace(0, 1, correction_grid_res)
+        v = np.linspace(0, 1, correction_grid_res)
+        uu, vv = np.meshgrid(u, v)
+        dist = np.maximum(np.abs(uu - 0.5), np.abs(vv - 0.5)) * 2  # 0 at center, 1 at edges
+        fade = np.clip((dist - 0.5) / 0.35, 0.0, 1.0)
+
+        # Apply fade and clamp
+        corrected_log = np.clip(smoothed * fade, -max_correction, max_correction)
+        correction_fields[fi] = np.exp(corrected_log).astype(np.float32)
+
+    if not correction_fields:
+        print("[SpatialDepth] No correction fields generated, skipping")
+        return
+
+    # --- E. Apply corrections ---
+    total_corrected = 0
+    for fi, field in correction_fields.items():
+        if all_means[fi].shape[0] == 0:
+            continue
+
+        R_cam = face_rotations[fi][0].cpu().numpy()
+        means_np = all_means[fi].cpu().numpy()
+        p_cam = means_np @ R_cam
+        front = p_cam[:, 2] > 0.01
+
+        if front.sum() == 0:
+            continue
+
+        p_front = p_cam[front]
+        # Map to correction grid coordinates
+        cols = p_front[:, 0] / p_front[:, 2] * f_grid + grid_size / 2
+        rows = -p_front[:, 1] / p_front[:, 2] * f_grid + grid_size / 2
+
+        # Scale pixel coords to correction grid space
+        grid_rows = rows / grid_size * (correction_grid_res - 1)
+        grid_cols = cols / grid_size * (correction_grid_res - 1)
+
+        # Clamp to valid range for bilinear sampling
+        grid_rows = grid_rows.clip(0, correction_grid_res - 2)
+        grid_cols = grid_cols.clip(0, correction_grid_res - 2)
+
+        # Bilinear sample the correction field
+        correction = _bilinear_sample_depth(field, grid_rows, grid_cols)
+
+        # Apply: multiply positions and scales
+        idx = np.where(front)[0]
+        corr_tensor = torch.from_numpy(correction.astype(np.float32)).to(device)
+        all_means[fi][idx] = all_means[fi][idx] * corr_tensor.unsqueeze(-1)
+        all_scales[fi][idx] = all_scales[fi][idx] * corr_tensor.unsqueeze(-1)
+
+        avg_pct = float(np.mean(np.abs(np.log(correction))) * 100)
+        max_pct = float(np.max(np.abs(np.log(correction))) * 100)
+        total_corrected += len(idx)
+        print(f"[SpatialDepth] Face {fi}: {len(idx):,} Gaussians, "
+              f"avg correction {avg_pct:.1f}%, max {max_pct:.1f}%")
+
+    print(f"[SpatialDepth] Total: {total_corrected:,} Gaussians corrected across "
+          f"{len(correction_fields)} faces")
+
+
+# ---------------------------------------------------------------------------
+# Spherical-harmonic depth correction
+# ---------------------------------------------------------------------------
+
+def _sh_basis_order3(dirs: np.ndarray) -> np.ndarray:
+    """Evaluate 16 real spherical harmonic basis functions (l=0..3).
+
+    Uses Y-up convention: dirs[:,0]=x, dirs[:,1]=y (polar axis), dirs[:,2]=z.
+    Returns [N, 16] matrix of SH basis values (Cartesian polynomial form).
+    """
+    x, y, z = dirs[:, 0], dirs[:, 1], dirs[:, 2]
+    N = dirs.shape[0]
+    B = np.empty((N, 16), dtype=np.float32)
+
+    # l=0
+    B[:, 0] = 0.28209479177387814  # 0.5 * sqrt(1/pi)
+
+    # l=1
+    B[:, 1] = 0.4886025119029199 * y   # Y_1^0
+    B[:, 2] = 0.4886025119029199 * z   # Y_1^{-1} (mapped to z)
+    B[:, 3] = 0.4886025119029199 * x   # Y_1^{+1}
+
+    # l=2
+    B[:, 4] = 1.0925484305920792 * x * y          # Y_2^{+1}
+    B[:, 5] = 1.0925484305920792 * y * z          # Y_2^{-1}
+    B[:, 6] = 0.31539156525252005 * (3*y*y - 1)   # Y_2^0
+    B[:, 7] = 1.0925484305920792 * x * z          # Y_2^{-2}
+    B[:, 8] = 0.5462742152960396 * (x*x - z*z)    # Y_2^{+2}
+
+    # l=3 (Y-up: standard z-up SH with y<->z swap)
+    B[:, 9]  = 0.3731763325901154 * x * (5*y*y - 1)
+    B[:, 10] = 2.890611442640554  * x * y * z
+    B[:, 11] = 0.4570457994644658 * y * (5*y*y - 3)       # zonal (y-axis)
+    B[:, 12] = 0.3731763325901154 * z * (5*y*y - 1)
+    B[:, 13] = 1.4453057213202769 * (x*x - z*z) * y
+    B[:, 14] = 0.5900435899266435 * x * (x*x - 3*z*z)
+    B[:, 15] = 0.5900435899266435 * z * (3*x*x - z*z)
+
+    return B
+
+
+def _sample_dap_at_directions(dirs: np.ndarray, dap_np: np.ndarray,
+                               H: int, W: int) -> np.ndarray:
+    """Bilinear-sample DAP depth at unit directions on the ERP map.
+
+    Uses the same ERP convention as the rest of the pipeline (Y-up):
+      phi = arccos(clip(y, -1, 1))      -> colatitude [0, pi]
+      theta = arctan2(-z, x) % 2pi     -> azimuth [0, 2pi]
+      row = phi/pi * (H-1), col = (1 - theta/2pi) * (W-1)
+    With horizontal wrap for the 360 boundary.
+    """
+    x, y, z = dirs[:, 0], dirs[:, 1], dirs[:, 2]
+    phi = np.arccos(np.clip(y, -1, 1))
+    theta = np.arctan2(-z, x) % (2 * np.pi)
+
+    row_f = (phi / np.pi * (H - 1)).clip(0, H - 1.001)
+    col_f = (1 - theta / (2 * np.pi)) * (W - 1)
+
+    # Bilinear with horizontal wrap
+    row0 = np.floor(row_f).astype(np.int32)
+    row1 = np.minimum(row0 + 1, H - 1)
+    col0 = np.floor(col_f).astype(np.int32) % W
+    col1 = (col0 + 1) % W
+    fr = (row_f - row0).astype(np.float32)
+    fc = (col_f - np.floor(col_f)).astype(np.float32)
+
+    depth = (dap_np[row0, col0] * (1 - fr) * (1 - fc) +
+             dap_np[row1, col0] * fr * (1 - fc) +
+             dap_np[row0, col1] * (1 - fr) * fc +
+             dap_np[row1, col1] * fr * fc)
+    return depth
+
+
+def _sh_depth_correction(
+    all_means: List[torch.Tensor],
+    all_scales: List[torch.Tensor],
+    dap_np: np.ndarray,
+    H: int, W: int,
+    all_face_forwards: List[np.ndarray],
+    sh_order: int = 3,
+    subsample_target: int = 50000,
+):
+    """Spherical-harmonic depth correction: smooth, face-boundary-free.
+
+    Fits a low-order SH model (16 coefficients for order 3) to the log-ratio
+    of DAP depth vs SHARP radial distance across the whole sphere, using only
+    Voronoi-winner Gaussians (nearest to their own face center). This ensures
+    the SH field models the depth that will actually survive Voronoi selection,
+    aligning each direction toward DAP and reducing face-boundary seams.
+
+    After the global SH fit, computes per-face median residual offsets to
+    correct face-specific biases that 16 SH coefficients can't capture.
+    """
+    t0 = time.time()
+    num_faces = len(all_means)
+    face_fwds = np.array(all_face_forwards, dtype=np.float32)  # [num_faces, 3]
+
+    # Collect all Gaussian positions across faces
+    all_pos = []
+    all_face_idx = []
+    for fi, m in enumerate(all_means):
+        if m.shape[0] == 0:
+            continue
+        all_pos.append(m.cpu().numpy())
+        all_face_idx.append(np.full(m.shape[0], fi, dtype=np.int32))
+    if not all_pos:
+        return
+
+    positions = np.concatenate(all_pos, axis=0)  # [N_total, 3]
+    face_indices = np.concatenate(all_face_idx, axis=0)
+    N_total = positions.shape[0]
+
+    # Subsample for fitting
+    rng = np.random.RandomState(42)
+    if N_total > subsample_target:
+        idx_sample = rng.choice(N_total, subsample_target, replace=False)
+    else:
+        idx_sample = np.arange(N_total)
+
+    pos_sample = positions[idx_sample]
+    fidx_sample = face_indices[idx_sample]
+    r_sharp = np.linalg.norm(pos_sample, axis=-1)
+    valid = r_sharp > 1e-6
+    pos_sample = pos_sample[valid]
+    fidx_sample = fidx_sample[valid]
+    r_sharp = r_sharp[valid]
+
+    # Unit directions for DAP sampling
+    dirs = pos_sample / r_sharp[:, None]
+    r_dap = _sample_dap_at_directions(dirs, dap_np, H, W)
+
+    # Filter valid DAP
+    valid_dap = r_dap > 1e-6
+    dirs = dirs[valid_dap]
+    r_sharp = r_sharp[valid_dap]
+    r_dap = r_dap[valid_dap]
+    fidx_sample = fidx_sample[valid_dap]
+
+    # --- Voronoi filter: keep only Gaussians nearest to their own face ---
+    cos_all = dirs @ face_fwds.T  # [N, num_faces]
+    nearest_face = np.argmax(cos_all, axis=-1)
+    is_winner = (nearest_face == fidx_sample)
+    n_winners = is_winner.sum()
+    print(f"[SH-Depth] Voronoi filter: {n_winners:,}/{len(is_winner):,} winners in subsample")
+
+    dirs_w = dirs[is_winner]
+    r_sharp_w = r_sharp[is_winner]
+    r_dap_w = r_dap[is_winner]
+
+    # Log-ratio: positive means SHARP is too close, needs pushing out
+    log_ratio = np.log(r_dap_w / r_sharp_w)
+
+    # Filter extreme outliers
+    keep = np.abs(log_ratio) < 1.0
+    log_ratio = log_ratio[keep]
+    dirs_fit = dirs_w[keep]
+    N_fit = len(log_ratio)
+
+    if N_fit < 100:
+        print(f"[SH-Depth] Too few valid samples ({N_fit}), skipping correction")
+        return
+
+    # Build SH basis matrix
+    B = _sh_basis_order3(dirs_fit)  # [N_fit, 16]
+
+    # Least-squares fit
+    coeffs, _, _, _ = np.linalg.lstsq(B, log_ratio, rcond=None)
+
+    # One IRLS iteration with Huber reweighting (2.5 sigma)
+    residuals = log_ratio - B @ coeffs
+    mad = np.median(np.abs(residuals))
+    sigma = mad * 1.4826  # MAD -> sigma estimate
+    if sigma > 1e-8:
+        threshold = 2.5 * sigma
+        weights = np.where(np.abs(residuals) <= threshold,
+                           1.0, threshold / np.abs(residuals))
+        Bw = B * weights[:, None]
+        lrw = log_ratio * weights
+        coeffs, _, _, _ = np.linalg.lstsq(Bw, lrw, rcond=None)
+        residuals = log_ratio - B @ coeffs
+        mad = np.median(np.abs(residuals))
+
+    print(f"[SH-Depth] Fit on {N_fit:,} winners, MAD={mad:.4f}")
+    print(f"[SH-Depth] SH coefficients: [{', '.join(f'{c:.4f}' for c in coeffs)}]")
+
+    # --- Apply SH correction, then compute per-face residual ---
+    face_residuals = {}
+    total_corrected = 0
+    for fi, m in enumerate(all_means):
+        if m.shape[0] == 0:
+            continue
+        pos_np = m.cpu().numpy()
+        r = np.linalg.norm(pos_np, axis=-1).clip(1e-8)
+        dirs_face = pos_np / r[:, None]
+        B_face = _sh_basis_order3(dirs_face)
+        sh_corr = np.exp(B_face @ coeffs).clip(0.5, 2.0)
+
+        # Corrected radial distance after SH
+        r_corrected = r * sh_corr
+
+        # Per-face residual: median log(DAP / r_corrected) for owned Gaussians
+        cos_own = dirs_face @ face_fwds[fi]
+        cos_best = np.max(dirs_face @ face_fwds.T, axis=-1)
+        owned = (cos_own >= cos_best - 1e-6)  # approximate Voronoi winners
+        if owned.sum() > 500:
+            r_dap_face = _sample_dap_at_directions(dirs_face[owned], dap_np, H, W)
+            valid_d = r_dap_face > 1e-6
+            if valid_d.sum() > 100:
+                lr = np.log(r_dap_face[valid_d] / r_corrected[owned][valid_d])
+                face_residuals[fi] = float(np.median(lr))
+
+        # Combined correction: SH + per-face residual
+        face_corr = np.exp(face_residuals.get(fi, 0.0))
+        face_corr = max(0.7, min(1.5, face_corr))
+        correction = sh_corr * face_corr
+        correction = correction.clip(0.5, 2.0)
+
+        corr_tensor = torch.from_numpy(correction.astype(np.float32)).to(m.device)
+        all_means[fi] = m * corr_tensor.unsqueeze(-1)
+        all_scales[fi] = all_scales[fi] * corr_tensor.unsqueeze(-1)
+        total_corrected += m.shape[0]
+
+    elapsed = time.time() - t0
+    residual_str = ', '.join(f'{face_residuals.get(i, 0.0):.3f}' for i in range(num_faces))
+    print(f"[SH-Depth] Per-face residuals (log): [{residual_str}]")
+    corr_pct = (np.abs(correction - 1.0) * 100)
+    print(f"[SH-Depth] SH depth correction: {total_corrected:,} Gaussians, "
+          f"avg shift {corr_pct.mean():.1f}%, max {corr_pct.max():.1f}%, "
+          f"took {elapsed:.1f}s")
+
+
 # ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
@@ -576,7 +1213,7 @@ class SHARPGaussianPipeline:
         self,
         device: torch.device,
         cubemap_size: int = 1536,
-        projection_mode: str = "cubemap",
+        projection_mode: str = "icosahedral",
     ):
         self.device = device
         self.cubemap_size = cubemap_size
@@ -959,6 +1596,16 @@ class SHARPGaussianPipeline:
             )
             print(f"[SHARP-Direct] Pairwise alignment done in {time.time() - t0:.1f}s")
 
+        # --- Spatially-varying depth correction (pre-Voronoi) ---
+        if len(all_means) > 1 and face_depth_maps:
+            t0 = time.time()
+            _spatially_varying_depth_correction(
+                all_means, all_scales,
+                face_depth_maps, face_rotations, all_face_forwards,
+                self.projector.face_fov, grid_size,
+            )
+            print(f"[SHARP-Direct] Spatial depth correction done in {time.time() - t0:.1f}s")
+
         # --- Apply Voronoi ownership + sky filter per face ---
         owned_means = []
         owned_scales = []
@@ -1021,31 +1668,7 @@ class SHARPGaussianPipeline:
         total_gaussians = means.shape[0]
         print(f"[SHARP-Direct] Merged: {total_gaussians:,} total Gaussians")
 
-        # --- Spatially-varying overlap corrections ---
-        # After global alignment, remaining local depth variation is handled
-        # by a per-Gaussian correction field built from seam-zone comparisons.
-        face_labels = torch.cat(all_face_labels, dim=0)
-        if len(face_scale_factors) > 1:
-            t0 = time.time()
-            corrections = self._overlap_scale_corrections(
-                means, face_labels, all_face_forwards, num_faces,
-            )
-            # corrections is now per-Gaussian [N] array
-            corr_t = torch.from_numpy(corrections).float().to(means.device)
-            adjusted = (corr_t - 1.0).abs() > 0.005
-            if adjusted.any():
-                means[adjusted] *= corr_t[adjusted].unsqueeze(-1)
-                scales[adjusted] *= corr_t[adjusted].unsqueeze(-1)
-            print(f"[SHARP-Direct] Overlap alignment done ({time.time() - t0:.1f}s)")
-
-        # --- Soft geometric transition at seam boundaries ---
-        if len(all_face_labels) > 1:
-            print(f"[SHARP-Direct] Running seam geometry smoothing...", flush=True)
-            t0 = time.time()
-            means = self._smooth_seam_geometry(
-                means, face_labels, all_face_forwards,
-            )
-            print(f"[SHARP-Direct] Seam geometry smoothing done in {time.time() - t0:.1f}s")
+        face_labels = torch.cat(all_face_labels, dim=0)  # needed for color smoothing
 
         # --- Post-merge seam color smoothing ---
         if len(all_face_labels) > 1:
@@ -1377,201 +2000,168 @@ class SHARPGaussianPipeline:
     def _smooth_seam_geometry(
         self,
         means: torch.Tensor,
+        scales: torch.Tensor,
         face_labels: torch.Tensor,
         all_face_forwards: List[np.ndarray],
-        smooth_strength: float = 0.8,
-        grid_res: int = 64,
-    ) -> torch.Tensor:
-        """Smooth positions near face Voronoi boundaries to reduce geometric seams.
+        face_depth_maps: Dict[int, np.ndarray],
+        face_rotations: List[tuple],
+        smooth_strength: float = 0.25,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Soft geometric transition at Voronoi boundaries using depth-map lookup.
 
-        For Gaussians in the seam band, computes the average radial depth from
-        neighboring faces in the same angular bin, then blends the Gaussian's
-        radial distance toward that average. The direction is preserved — only
-        the depth changes. This eliminates "step" artifacts at face boundaries
-        without causing ghosting (no opacity change, no doubled geometry).
+        Instead of binning post-Voronoi survivors on a coarse grid, this directly
+        projects each seam Gaussian into the runner-up face's camera and samples
+        its depth map.  The Gaussian's radial depth is then blended toward the
+        runner-up's prediction, weighted by proximity to the boundary.
 
-        Args:
-            means: [N, 3] world positions
-            face_labels: [N] face index per Gaussian
-            all_face_forwards: list of face forward vectors
-            smooth_strength: blend factor toward cross-face depth (0-1)
-            grid_res: resolution of the spherical binning grid
+        This gives per-Gaussian precision using the original SHARP depth predictions
+        rather than degraded post-Voronoi averages.
+
+        Returns:
+            (means, scales) — both adjusted along radial direction.
         """
-        if smooth_strength <= 0 or means.shape[0] == 0:
-            return means
+        if smooth_strength <= 0 or means.shape[0] == 0 or not face_depth_maps:
+            return means, scales
 
-        N = means.shape[0]
         num_faces = len(all_face_forwards)
         device = means.device
+        face_fov = self.projector.face_fov
+        grid_size = self.SHARP_INPUT_SIZE // 2  # 768
+        f_grid = grid_size / (2 * math.tan(face_fov / 2))
 
-        dirs_np = F.normalize(means, dim=-1).cpu().numpy()
+        means_np = means.cpu().numpy()
         labels_np = face_labels.cpu().numpy()
-        dists_np = means.norm(dim=-1).cpu().numpy()
+        dists_np = np.linalg.norm(means_np, axis=-1)
+        dirs_np = means_np / (dists_np[:, None] + 1e-8)
 
-        # Find seam-zone Gaussians
+        # --- Find seam Gaussians and their runner-up face ---
         fwd_stack = np.stack(all_face_forwards, axis=0)
-        cos_angles = dirs_np @ fwd_stack.T
+        cos_angles = dirs_np @ fwd_stack.T  # [N, num_faces]
         top2_idx = np.argpartition(-cos_angles, 2, axis=1)[:, :2]
+        # Sort top2 so [:, 0] is the closest face
         cos_top2 = np.take_along_axis(cos_angles, top2_idx, axis=1)
-        margin = cos_top2.max(axis=1) - cos_top2.min(axis=1)
+        order = np.argsort(-cos_top2, axis=1)
+        top2_idx = np.take_along_axis(top2_idx, order, axis=1)
+        cos_top2 = np.take_along_axis(cos_top2, order, axis=1)
 
-        seam_threshold = 0.25  # wider band for better cross-face coverage
+        margin = cos_top2[:, 0] - cos_top2[:, 1]
+        seam_threshold = 0.15
         seam_mask = margin < seam_threshold
         seam_idx = np.where(seam_mask)[0]
 
         if len(seam_idx) < 10:
-            return means
+            return means, scales
 
-        # Bin seam Gaussians on ERP grid
-        grid_cols = grid_res * 2
-        num_cells = grid_res * grid_cols
+        # Runner-up = whichever of top2 is NOT the owning face
+        owner_face = labels_np[seam_idx]
+        runner_up = np.where(
+            top2_idx[seam_idx, 0] == owner_face,
+            top2_idx[seam_idx, 1],
+            top2_idx[seam_idx, 0],
+        )
 
-        seam_dirs = dirs_np[seam_idx]
-        seam_labels = labels_np[seam_idx]
+        # --- Compute effective scale per face ---
+        # Ratio of current world-space depth to raw depth map value
+        effective_scale = {}
+        for fi in range(num_faces):
+            if fi not in face_depth_maps:
+                continue
+            fi_mask = labels_np == fi
+            if fi_mask.sum() < 100:
+                continue
+            R_cam = face_rotations[fi][0].cpu().numpy()
+            fi_means = means_np[fi_mask]
+            p_cam = fi_means @ R_cam
+            front = p_cam[:, 2] > 0.01
+            if front.sum() < 50:
+                continue
+            p_f = p_cam[front]
+            cols = p_f[:, 0] / p_f[:, 2] * f_grid + grid_size / 2
+            rows = -p_f[:, 1] / p_f[:, 2] * f_grid + grid_size / 2
+            valid = (rows >= 0) & (rows < grid_size - 1) & (cols >= 0) & (cols < grid_size - 1)
+            if valid.sum() < 50:
+                continue
+            raw_d = _bilinear_sample_depth(face_depth_maps[fi], rows[valid], cols[valid])
+            cur_d = np.linalg.norm(fi_means[front][valid], axis=-1)
+            effective_scale[fi] = float(np.median(cur_d / np.maximum(raw_d, 1e-6)))
+
+        # --- Project seam Gaussians into runner-up camera, sample depth ---
+        seam_means = means_np[seam_idx]
         seam_dists = dists_np[seam_idx]
+        seam_dirs = dirs_np[seam_idx]
+        target_depth = np.full(len(seam_idx), np.nan, dtype=np.float64)
 
-        x, y, z = seam_dirs[:, 0], seam_dirs[:, 1], seam_dirs[:, 2]
-        phi = np.arccos(np.clip(y, -1, 1))
-        theta = np.arctan2(-z, x) % (2 * np.pi)
-        row = (phi / np.pi * (grid_res - 1)).clip(0, grid_res - 1).astype(np.int32)
-        col = (theta / (2 * np.pi) * (grid_cols - 1)).clip(0, grid_cols - 1).astype(np.int32)
-        cell_id = row * grid_cols + col
-
-        # Per-cell, per-face distance accumulation
-        # Layout: (num_faces, num_cells) so face_dist[fi, cell] works correctly
-        combined_key = seam_labels * num_cells + cell_id
-        max_key = num_faces * num_cells
-
-        dist_sum = np.zeros(max_key, dtype=np.float64)
-        dist_count = np.zeros(max_key, dtype=np.int32)
-        np.add.at(dist_sum, combined_key, seam_dists)
-        np.add.at(dist_count, combined_key, 1)
-
-        # Total per cell (all faces)
-        cell_total_sum = np.zeros(num_cells, dtype=np.float64)
-        cell_total_count = np.zeros(num_cells, dtype=np.int32)
-        np.add.at(cell_total_sum, cell_id, seam_dists)
-        np.add.at(cell_total_count, cell_id, 1)
-
-        # Cross-face average depth per seam Gaussian
-        same_key = combined_key
-        same_sum = dist_sum[same_key]
-        same_count = dist_count[same_key]
-
-        cross_sum = cell_total_sum[cell_id] - same_sum
-        cross_count = cell_total_count[cell_id] - same_count
-
-        has_cross = cross_count > 0
-        if not has_cross.any():
-            return means
-
-        cross_avg_dist = np.zeros(len(seam_idx), dtype=np.float64)
-        cross_avg_dist[has_cross] = cross_sum[has_cross] / cross_count[has_cross]
-
-        # Build per-face correction field on spherical grid, then smooth
-        # to cover Gaussians that lack direct cross-face data in their cell.
-        from scipy.ndimage import gaussian_filter
-
-        face_correction_ratio = np.ones((num_faces, grid_res, grid_cols), dtype=np.float64)
-        has_ratio = np.zeros((num_faces, grid_res, grid_cols), dtype=bool)
-
-        # Per-face mean depth per cell
-        face_dist = dist_sum.reshape(num_faces, num_cells)
-        face_count = dist_count.reshape(num_faces, num_cells)
-
-        for fi in range(num_faces):
-            fi_seam = seam_labels == fi
-            if fi_seam.sum() == 0:
+        for fi_dst in range(num_faces):
+            if fi_dst not in face_depth_maps or fi_dst not in effective_scale:
                 continue
-            fi_cells = cell_id[fi_seam]
-            fi_dists = seam_dists[fi_seam]
-            fi_cross_sum = cell_total_sum[fi_cells] - face_dist[fi, fi_cells].clip(0)
-            fi_cross_cnt = cell_total_count[fi_cells] - face_count[fi, fi_cells].clip(0)
-            fi_has_cross = fi_cross_cnt > 0
-            if not fi_has_cross.any():
+            dst_mask = runner_up == fi_dst
+            if dst_mask.sum() == 0:
                 continue
-            fi_cross_avg = np.zeros(fi_seam.sum(), dtype=np.float64)
-            fi_cross_avg[fi_has_cross] = fi_cross_sum[fi_has_cross] / fi_cross_cnt[fi_has_cross]
 
-            # Compute ratio: cross-face avg / own depth
-            fi_own_valid = (fi_dists > 0.1) & fi_has_cross & (fi_cross_avg > 0.1)
-            if fi_own_valid.sum() == 0:
+            R_dst = face_rotations[fi_dst][0].cpu().numpy()
+            pts = seam_means[dst_mask]
+            d_cam = pts @ R_dst
+            front = d_cam[:, 2] > 0.01
+            if front.sum() == 0:
                 continue
-            ratios = fi_cross_avg[fi_own_valid] / fi_dists[fi_own_valid]
-            ratio_cells = fi_cells[fi_own_valid]
-            ratio_rows = ratio_cells // grid_cols
-            ratio_cols = ratio_cells % grid_cols
 
-            # Store ratios in grid (use median per cell for robustness)
-            unique_cells = np.unique(ratio_cells)
-            for uc in unique_cells:
-                uc_mask = ratio_cells == uc
-                r_median = np.median(ratios[uc_mask])
-                if 0.2 < r_median < 5.0:
-                    rr, rc = uc // grid_cols, uc % grid_cols
-                    face_correction_ratio[fi, rr, rc] = r_median
-                    has_ratio[fi, rr, rc] = True
-
-        # Smooth the correction fields to fill gaps (key improvement)
-        sigma_smooth = 5.0  # ~14° smoothing radius
-        for fi in range(num_faces):
-            if not has_ratio[fi].any():
+            cols = d_cam[front, 0] / d_cam[front, 2] * f_grid + grid_size / 2
+            rows = -d_cam[front, 1] / d_cam[front, 2] * f_grid + grid_size / 2
+            valid = (rows >= 0) & (rows < grid_size - 1) & (cols >= 0) & (cols < grid_size - 1)
+            if valid.sum() == 0:
                 continue
-            weight = has_ratio[fi].astype(np.float64)
-            log_r = np.log(face_correction_ratio[fi])
-            log_r[~has_ratio[fi]] = 0.0
-            sm_num = gaussian_filter(log_r * weight, sigma=sigma_smooth, mode='wrap')
-            sm_den = gaussian_filter(weight, sigma=sigma_smooth, mode='wrap')
-            valid = sm_den > 0.01
-            face_correction_ratio[fi][valid] = np.exp(sm_num[valid] / sm_den[valid])
-            face_correction_ratio[fi][~valid] = 1.0
 
-        # Sample smoothed correction for each seam Gaussian
-        seam_corrections = np.ones(len(seam_idx), dtype=np.float64)
-        for fi in range(num_faces):
-            fi_mask = seam_labels == fi
-            if fi_mask.sum() == 0:
-                continue
-            fi_rows = row[fi_mask]
-            fi_cols = col[fi_mask]
-            seam_corrections[fi_mask] = face_correction_ratio[fi, fi_rows, fi_cols]
+            raw_d = _bilinear_sample_depth(face_depth_maps[fi_dst], rows[valid], cols[valid])
+            pred_d = raw_d * effective_scale[fi_dst]
 
-        # Blend weight: stronger near boundary (small margin)
+            # Write into target_depth at the right positions
+            dst_global = np.where(dst_mask)[0]
+            front_global = dst_global[front]
+            valid_global = front_global[valid]
+            target_depth[valid_global] = pred_d
+
+        # --- Blend toward runner-up prediction ---
+        has_target = ~np.isnan(target_depth)
+        if has_target.sum() == 0:
+            return means, scales
+
+        # Blend weight: stronger near boundary (small margin), zero at face center
         margin_seam = margin[seam_idx]
         blend = (1.0 - margin_seam / seam_threshold).clip(0, 1) * smooth_strength
 
-        # Compute new radial distance
-        target_dist = seam_dists * seam_corrections
-        new_dist = (1 - blend) * seam_dists + blend * target_dist
+        new_dist = np.copy(seam_dists)
+        new_dist[has_target] = (
+            (1 - blend[has_target]) * seam_dists[has_target] +
+            blend[has_target] * target_depth[has_target]
+        )
 
-        # Apply: scale position along its direction
+        # Scale ratio (radial correction only, direction preserved)
         scale_ratio = np.ones(len(seam_idx), dtype=np.float64)
         nonzero = seam_dists > 0.01
         scale_ratio[nonzero] = new_dist[nonzero] / seam_dists[nonzero]
+        scale_ratio = np.clip(scale_ratio, 0.85, 1.15)  # safety clamp ±15%
 
-        # Safety clamp
-        scale_ratio = np.clip(scale_ratio, 0.3, 3.0)
-
-        # Build full-size correction array
-        result = means.clone()
+        # Apply
+        result_means = means.clone()
+        result_scales = scales.clone()
         seam_idx_t = torch.from_numpy(seam_idx).long().to(device)
-        ratio_t = torch.from_numpy(scale_ratio).float().to(device)
+        ratio_t = torch.from_numpy(scale_ratio.astype(np.float32)).to(device)
 
         adjusted_mask = (ratio_t - 1.0).abs() > 0.001
         if adjusted_mask.any():
             idx = seam_idx_t[adjusted_mask]
             r = ratio_t[adjusted_mask].unsqueeze(-1)
-            result[idx] = result[idx] * r
+            result_means[idx] = result_means[idx] * r
+            result_scales[idx] = result_scales[idx] * r
 
         n_adjusted = adjusted_mask.sum().item()
+        avg_shift = 0.0
         if n_adjusted > 0:
-            avg_shift = np.abs(scale_ratio[adjusted_mask.cpu().numpy()] - 1.0).mean() * 100
-        else:
-            avg_shift = 0.0
+            avg_shift = float(np.mean(np.abs(scale_ratio[adjusted_mask.cpu().numpy()] - 1.0)) * 100)
         print(f"[SHARP-Direct]   Seam geometry: {n_adjusted:,}/{len(seam_idx):,} seam Gaussians adjusted "
               f"(avg shift: {avg_shift:.1f}%)")
 
-        return result
+        return result_means, result_scales
 
     def _smooth_seam_colors(
         self,
