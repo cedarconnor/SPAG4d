@@ -24,7 +24,7 @@
             <div class="logo">
                 <span class="logo-icon">◉</span>
                 <h1>SPAG-4D</h1>
-                <span class="version">v2.0.0</span>
+                <span class="version">v3.0.0</span>
             </div>
             <div class="header-right">
                 <span class="tagline">360° Panorama to Gaussian Splat</span>
@@ -81,19 +81,22 @@
                 <ol>
                     <li><strong>Upload</strong> a 2:1 equirectangular panorama (JPG/PNG)</li>
                     <li><strong>Adjust</strong> parameters below (defaults work well for most scenes)</li>
-                    <li><strong>Convert</strong> — DAP depth estimation runs first, then SHARP Gaussian generation</li>
+                    <li><strong>Convert</strong> — Depth estimation + SPAG conversion (or optional SHARP refinement)</li>
                     <li><strong>Preview</strong> in the 3D viewer: orbit with mouse, scroll to zoom</li>
                     <li><strong>Download</strong> as PLY for use in Blender, SuperSplat, or any 3DGS viewer</li>
                 </ol>
 
                 <h3>Parameters</h3>
                 <dl class="help-params">
-                    <dt>Projection</dt>
-                    <dd><strong>Cubemap (6)</strong> = faster, 6-face cubemap. <strong>Icosa (20)</strong>
-                        = 20 tangent faces, less distortion, better pole quality.</dd>
+                    <dt>Depth Model</dt>
+                    <dd><strong>DAP</strong> = metric depth, designed for 360°. <strong>DA360</strong>
+                        = scale-invariant disparity with circular padding.</dd>
 
-                    <dt>Face Size</dt>
-                    <dd>SHARP processing resolution per face. Higher = better detail but more VRAM/time.</dd>
+                    <dt>SHARP Refine</dt>
+                    <dd>Enable per-face SHARP refinement for higher quality (slower). Off = fast SPAG mode.</dd>
+
+                    <dt>Stride</dt>
+                    <dd>SPAG pixel stride. 1 = one Gaussian per pixel (max quality), 2 = quarter density (default), 4 = fast preview.</dd>
 
                     <dt>Depth Range</dt>
                     <dd>Valid depth in meters. Points outside this range are clipped.</dd>
@@ -101,16 +104,13 @@
                     <dt>Sky Cutoff</dt>
                     <dd>Distance (meters) beyond which points are removed.</dd>
 
-                    <dt>Grid Jitter</dt>
-                    <dd>Breaks regular dot patterns from SHARP's grid. Default 0.03 is subtle.</dd>
-
                     <dt>Floaters Cleanup</dt>
                     <dd>Statistical outlier removal. 0 = off, higher = more aggressive.</dd>
                 </dl>
 
                 <div class="tip">
-                    Quick Tips: For indoor scenes, reduce Sky Cutoff to 30m. For landscapes, use Icosa (20)
-                    projection for best pole quality.
+                    Quick Tips: SPAG mode is fast (~10s). Enable SHARP refine for higher quality (~60s+).
+                    For indoor scenes, reduce Sky Cutoff to 30m.
                 </div>
             </div>
 
@@ -140,23 +140,28 @@
                 <!-- Parameters -->
                 <div class="params-row">
                     <div class="param-group"
-                        title="Projection mode. Cubemap (6 faces, fast) or Icosahedral (20 faces, better quality).">
-                        <label for="sharp-projection">Projection</label>
-                        <select id="sharp-projection" style="width: 85px;">
-                            <option value="cubemap" selected>Cube (6)</option>
-                            <option value="icosahedral">Icosa (20)</option>
+                        title="Depth estimation model. DAP = metric depth for 360°. DA360 = circular padding DPT.">
+                        <label for="depth-model">Depth Model</label>
+                        <select id="depth-model" style="width: 85px;">
+                            <option value="dap" selected>DAP</option>
+                            <option value="da360">DA360</option>
                         </select>
                     </div>
 
                     <div class="param-group"
-                        title="SHARP processing resolution per face. Higher = better quality but more VRAM.">
-                        <label for="sharp-cubemap-size">Face Size</label>
-                        <select id="sharp-cubemap-size" style="width: 85px;">
-                            <option value="768">768 (Fast)</option>
-                            <option value="1536" selected>1536 (Def)</option>
-                            <option value="1920">1920 (High)</option>
-                            <option value="2304">2304 (Ultra)</option>
-                            <option value="3072">3072 (Max)</option>
+                        title="Enable SHARP per-face refinement for higher quality (slower).">
+                        <label for="sharp-refine">SHARP Refine</label>
+                        <input type="checkbox" id="sharp-refine">
+                    </div>
+
+                    <div class="param-group"
+                        title="SPAG pixel stride. Lower = more Gaussians. 1=full, 2=quarter, 4=sixteenth.">
+                        <label for="stride">Stride</label>
+                        <select id="stride" style="width: 60px;">
+                            <option value="1">1</option>
+                            <option value="2" selected>2</option>
+                            <option value="4">4</option>
+                            <option value="8">8</option>
                         </select>
                     </div>
 
@@ -179,13 +184,6 @@
                     </div>
 
                     <div class="param-group"
-                        title="Grid jitter for anti-aliasing. 0=off, 0.5=max.">
-                        <label for="grid-jitter">Jitter</label>
-                        <input type="range" id="grid-jitter" min="0" max="0.5" step="0.01" value="0.03"
-                            style="width: 80px;">
-                    </div>
-
-                    <div class="param-group"
                         title="Statistical outlier removal. 0=off, 1=aggressive.">
                         <label for="outlier-pruning">Floaters Cleanup</label>
                         <input type="range" id="outlier-pruning" min="0" max="1" step="0.1" value="0.0"
@@ -196,6 +194,27 @@
                         title="Global depth multiplier.">
                         <label for="global-scale">Depth Scale</label>
                         <input type="number" id="global-scale" value="1.0" min="0.1" max="10" step="0.1">
+                    </div>
+
+                    <!-- SHARP-only params (hidden unless SHARP refine checked) -->
+                    <div class="param-group sharp-only"
+                        title="Projection mode for SHARP refinement." style="display: none;">
+                        <label for="sharp-projection">Projection</label>
+                        <select id="sharp-projection" style="width: 85px;">
+                            <option value="cubemap">Cube (6)</option>
+                            <option value="icosahedral" selected>Icosa (20)</option>
+                        </select>
+                    </div>
+
+                    <div class="param-group sharp-only"
+                        title="SHARP face resolution." style="display: none;">
+                        <label for="sharp-cubemap-size">Face Size</label>
+                        <select id="sharp-cubemap-size" style="width: 85px;">
+                            <option value="768">768</option>
+                            <option value="1536" selected>1536</option>
+                            <option value="1920">1920</option>
+                            <option value="2304">2304</option>
+                        </select>
                     </div>
                 </div>
             </div>

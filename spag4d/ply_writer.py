@@ -25,19 +25,20 @@ def _linearRGB_to_sRGB(linear: np.ndarray) -> np.ndarray:
 def save_ply_gsplat(
     gaussians: dict,
     path: str,
-    sh_degree: int = 0
+    sh_degree: int = 0,
+    colors_linear: bool = True,
 ) -> None:
     """
     Save Gaussians to PLY format compatible with gsplat viewers.
-    
-    Performs coordinate transform from internal Y-up to OpenCV Y-down.
-    
+
     Args:
         gaussians: Dict with means, scales, quats, colors, opacities,
                    and optionally 'sh1' [N,9] SH band-1 coefficients
         path: Output PLY file path
         sh_degree: SH degree (0 = DC only, 1 = band-1, ...)
                    Auto-elevated to 1 if gaussians contains 'sh1'.
+        colors_linear: If True (SHARP path), apply linearRGB->sRGB conversion.
+                       If False (SPAG path), colors are already sRGB — skip gamma.
     """
     # Helper to ensure numpy
     def to_numpy(x):
@@ -70,10 +71,15 @@ def save_ply_gsplat(
     # Scales: log-space
     log_scales = np.log(np.clip(scales, 1e-7, None))
     
-    # Colors: linearRGB -> sRGB, then SH DC coefficients
-    # SHARP outputs linearRGB; standard 3DGS renderers expect sRGB in SH0.
-    # Matches Apple's save_ply() conversion path.
-    colors_srgb = _linearRGB_to_sRGB(np.clip(colors, 0.0, 1.0))
+    # Colors -> SH DC coefficients
+    # SHARP outputs linearRGB; SPAG outputs sRGB directly from pixels.
+    colors_clamped = np.clip(colors, 0.0, 1.0)
+    if colors_linear:
+        # SHARP path: linearRGB -> sRGB conversion needed
+        colors_srgb = _linearRGB_to_sRGB(colors_clamped)
+    else:
+        # SPAG path: already sRGB, skip gamma
+        colors_srgb = colors_clamped
     sh_dc = (colors_srgb - 0.5) / SH_C0
     
     # Opacity: logit-space

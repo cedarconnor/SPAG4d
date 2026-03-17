@@ -3,7 +3,7 @@ setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
 echo ==================================================
-echo   SPAG-4D v2.0 Installer
+echo   SPAG-4D v3.0 Installer
 echo ==================================================
 echo.
 
@@ -67,7 +67,7 @@ echo.
 set "PIP=%PYTHON_DIR%\Scripts\pip.exe"
 if not exist "!PIP!" set "PIP=%PYTHON_DIR%\python.exe -m pip"
 
-echo [1/4] Installing PyTorch (CUDA 12.1)...
+echo [1/7] Installing PyTorch (CUDA 12.1)...
 !PIP! install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 if errorlevel 1 (
     echo [WARN] PyTorch install had errors. Retrying...
@@ -75,12 +75,12 @@ if errorlevel 1 (
 )
 
 echo.
-echo [2/4] Installing SPAG-4D...
+echo [2/7] Installing SPAG-4D dependencies...
 !PIP! install -r requirements.txt
 !PIP! install -e ".[server,download]"
 
 echo.
-echo [3/4] Installing ML-SHARP (Apple)...
+echo [3/7] Installing ML-SHARP (Apple)...
 if not exist "ml-sharp\pyproject.toml" (
     echo    Cloning ML-SHARP...
     git clone https://github.com/apple/ml-sharp ml-sharp
@@ -89,14 +89,12 @@ if exist "ml-sharp\pyproject.toml" (
     !PIP! install --no-deps -e ml-sharp
     echo    [OK] ML-SHARP installed.
 ) else (
-    echo    [ERROR] ML-SHARP clone failed. SHARP is required for SPAG-4D.
-    echo           Check your internet connection and try again.
-    pause
-    exit /b 1
+    echo    [WARN] ML-SHARP clone failed. SHARP refinement will not be available.
+    echo          You can still use SPAG mode (the default).
 )
 
 echo.
-echo [4/4] Installing DAP depth model...
+echo [4/7] Installing DAP depth model...
 if not exist "spag4d\dap_arch\DAP\networks" (
     echo    Initializing DAP submodule...
     git submodule update --init --recursive
@@ -105,7 +103,59 @@ if not exist "spag4d\dap_arch\DAP\networks" (
         git clone https://github.com/Insta360-Research-Team/DAP spag4d\dap_arch\DAP
     )
 )
-echo    [OK] DAP ready.
+echo    [OK] DAP architecture ready.
+
+echo.
+echo [5/7] Installing DA360 depth model...
+if not exist "spag4d\da360_arch\DA360\networks" (
+    echo    Cloning DA360...
+    git clone https://github.com/Insta360-Research-Team/DA360 spag4d\da360_arch\DA360
+)
+if exist "spag4d\da360_arch\DA360\networks" (
+    echo    [OK] DA360 architecture ready.
+) else (
+    echo    [WARN] DA360 clone failed. DA360 depth model will not be available.
+    echo          DAP (the default depth model) still works.
+)
+
+echo.
+echo [6/7] Installing gdown (for DA360 weights)...
+!PIP! install gdown
+
+echo.
+echo [7/7] Downloading model weights...
+echo    This may take several minutes on first install.
+echo.
+
+:: Set environment variable so models cache in a known location
+set "SPAG4D_CACHE=%USERPROFILE%\.cache\spag4d"
+if not exist "%SPAG4D_CACHE%" mkdir "%SPAG4D_CACHE%"
+
+:: Download DAP weights (~1.5 GB)
+if exist "%SPAG4D_CACHE%\model.pth" (
+    echo    [OK] DAP weights already cached.
+) else (
+    echo    Downloading DAP weights (~1.5 GB)...
+    "%PYTHON_DIR%\python.exe" -c "from spag4d.dap_model import DAPModel; DAPModel._get_or_download_weights()"
+    if exist "%SPAG4D_CACHE%\model.pth" (
+        echo    [OK] DAP weights downloaded.
+    ) else (
+        echo    [WARN] DAP weight download failed. Will retry on first use.
+    )
+)
+
+:: Download DA360 weights (~1.3 GB)
+if exist "%SPAG4D_CACHE%\DA360_large.pth" (
+    echo    [OK] DA360 weights already cached.
+) else (
+    echo    Downloading DA360 weights (~1.3 GB)...
+    "%PYTHON_DIR%\python.exe" -c "import gdown, os; cache=os.path.expanduser('~/.cache/spag4d'); os.makedirs(cache, exist_ok=True); gdown.download_folder('https://drive.google.com/drive/folders/1FMLWZfJ_IPKOa_cEbVqrq8_BRkl3oB_2', output=cache, quiet=False)"
+    if exist "%SPAG4D_CACHE%\DA360_large.pth" (
+        echo    [OK] DA360 weights downloaded.
+    ) else (
+        echo    [WARN] DA360 weight download failed. Will retry on first use.
+    )
+)
 
 echo.
 echo ==================================================
@@ -113,6 +163,9 @@ echo   Installation Complete!
 echo.
 echo   Run 'run.bat' to start SPAG-4D.
 echo   Opens http://localhost:7860 in your browser.
+echo.
+echo   Depth models: DAP + DA360
+echo   Pipeline modes: SPAG (fast) + SHARP (optional)
 echo ==================================================
 echo.
 pause

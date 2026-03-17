@@ -154,13 +154,15 @@ async def add_coop_coep(request: Request, call_next):
 @app.post("/api/convert")
 async def convert_panorama(
     file: UploadFile = File(...),
+    depth_model: str = Query("dap", regex="^(dap|da360)$"),
+    sharp_refine: bool = Query(False),
+    stride: int = Query(2, ge=1, le=8),
     depth_min: float = Query(0.1, ge=0.01),
     depth_max: float = Query(100.0, le=1000.0),
     sky_threshold: float = Query(80.0),
-    grid_jitter: float = Query(0.03, ge=0.0, le=0.5),
     outlier_pruning: float = Query(0.0, ge=0.0, le=1.0),
     global_scale: float = Query(1.0, ge=0.1, le=10.0),
-    sharp_projection: str = Query("cubemap"),
+    sharp_projection: str = Query("icosahedral"),
     sharp_cubemap_size: int = Query(1536, ge=256, le=4096),
 ):
     """Convert uploaded panorama to Gaussian splat PLY."""
@@ -168,19 +170,31 @@ async def convert_panorama(
         raise HTTPException(400, f"Invalid sharp_projection: {sharp_projection!r}. Must be 'cubemap' or 'icosahedral'.")
     if depth_min >= depth_max:
         raise HTTPException(400, f"depth_min ({depth_min}) must be less than depth_max ({depth_max}).")
-    content = await file.read()
-    if len(content) > MAX_UPLOAD_SIZE:
-        raise HTTPException(400, f"File too large. Max: {MAX_UPLOAD_SIZE // 1024 // 1024}MB")
+
+    # Stream upload with incremental size check
+    chunks = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_UPLOAD_SIZE:
+            raise HTTPException(400, f"File too large. Max: {MAX_UPLOAD_SIZE // 1024 // 1024}MB")
+        chunks.append(chunk)
+    content = b"".join(chunks)
 
     job_id = str(uuid.uuid4())
     job = JobInfo(job_id)
     jobs[job_id] = job
 
     job.params = {
+        "depth_model": depth_model,
+        "sharp_refine": sharp_refine,
+        "stride": stride,
         "depth_min": depth_min,
         "depth_max": depth_max,
         "sky_threshold": sky_threshold,
-        "grid_jitter": grid_jitter,
         "outlier_pruning": outlier_pruning,
         "global_scale": global_scale,
         "sharp_projection": sharp_projection,
@@ -197,10 +211,12 @@ async def convert_panorama(
 
     asyncio.create_task(process_job(
         job,
+        depth_model=depth_model,
+        sharp_refine=sharp_refine,
+        stride=stride,
         depth_min=depth_min,
         depth_max=depth_max,
         sky_threshold=sky_threshold,
-        grid_jitter=grid_jitter,
         outlier_pruning=outlier_pruning,
         global_scale=global_scale,
         sharp_projection=sharp_projection,
@@ -216,13 +232,15 @@ async def convert_panorama(
 
 async def process_job(
     job: JobInfo,
+    depth_model: str = "dap",
+    sharp_refine: bool = False,
+    stride: int = 2,
     depth_min: float = 0.1,
     depth_max: float = 100.0,
     sky_threshold: float = 80.0,
-    grid_jitter: float = 0.03,
     outlier_pruning: float = 0.0,
     global_scale: float = 1.0,
-    sharp_projection: str = "cubemap",
+    sharp_projection: str = "icosahedral",
     sharp_cubemap_size: int = 1536,
 ):
     """Process conversion job with GPU semaphore."""
@@ -239,9 +257,10 @@ async def process_job(
                 depth_min=depth_min,
                 depth_max=depth_max,
                 sky_threshold=sky_threshold,
-                grid_jitter=grid_jitter,
+                stride=stride,
                 outlier_pruning=outlier_pruning,
                 global_scale=global_scale,
+                sharp_refine=sharp_refine,
                 sharp_projection=sharp_projection,
                 sharp_cubemap_size=sharp_cubemap_size,
                 depth_preview_path=str(job.depth_preview_path),
@@ -341,9 +360,13 @@ async def download_file(job_id: str):
 
 
 @app.post("/api/shutdown")
-async def shutdown_server():
-    """Shut down the SPAG-4D server."""
+async def shutdown_server(request: Request):
+    """Shut down the SPAG-4D server (localhost only)."""
     import os
+
+    client = request.client.host if request.client else ""
+    if client not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(403, "Shutdown is only allowed from localhost")
 
     async def _exit():
         await asyncio.sleep(0.5)
@@ -395,10 +418,9 @@ def kill_existing_server(port: int):
             capture_output=True, text=True,
         )
         for line in result.stdout.splitlines():
-            # Match exact port (e.g. ":7860 " not ":17860")
             parts = line.split()
             if "LISTENING" in line and len(parts) >= 2:
-                local_addr = parts[1]  # e.g. "0.0.0.0:7860" or "127.0.0.1:7860"
+                local_addr = parts[1]
                 if local_addr.endswith(f":{port}"):
                     pid = parts[-1]
                     subprocess.run(

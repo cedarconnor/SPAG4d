@@ -24,10 +24,12 @@ class SPAG4DApp {
         this.gpuStatus = document.getElementById('gpu-status');
 
         // Parameters
+        this.depthModelInput = document.getElementById('depth-model');
+        this.sharpRefineInput = document.getElementById('sharp-refine');
+        this.strideInput = document.getElementById('stride');
         this.depthMinInput = document.getElementById('depth-min');
         this.depthMaxInput = document.getElementById('depth-max');
         this.skyThresholdInput = document.getElementById('sky-threshold');
-        this.gridJitterInput = document.getElementById('grid-jitter');
         this.outlierPruningInput = document.getElementById('outlier-pruning');
         this.globalScaleInput = document.getElementById('global-scale');
         this.sharpProjectionInput = document.getElementById('sharp-projection');
@@ -41,6 +43,11 @@ class SPAG4DApp {
         this.fileInput.addEventListener('change', (e) => this.handleFileSelect(e));
         this.convertBtn.addEventListener('click', () => this.startConversion());
         this.downloadPlyBtn.addEventListener('click', () => this.downloadFile());
+
+        // SHARP refine toggle: show/hide SHARP-only params
+        if (this.sharpRefineInput) {
+            this.sharpRefineInput.addEventListener('change', () => this.toggleSharpParams());
+        }
 
         // Reset View Button
         const resetBtn = document.getElementById('reset-view-btn');
@@ -99,6 +106,13 @@ class SPAG4DApp {
 
         // Preload test image
         this.preloadTestImage();
+    }
+
+    toggleSharpParams() {
+        const show = this.sharpRefineInput.checked;
+        document.querySelectorAll('.sharp-only').forEach(el => {
+            el.style.display = show ? '' : 'none';
+        });
     }
 
     ensureViewer() {
@@ -188,10 +202,12 @@ class SPAG4DApp {
         formData.append('file', this.currentFile);
 
         const params = new URLSearchParams({
+            depth_model: this.depthModelInput.value,
+            sharp_refine: this.sharpRefineInput.checked,
+            stride: this.strideInput.value,
             depth_min: this.depthMinInput.value,
             depth_max: this.depthMaxInput.value,
             sky_threshold: this.skyThresholdInput.value,
-            grid_jitter: this.gridJitterInput.value,
             outlier_pruning: this.outlierPruningInput.value,
             global_scale: this.globalScaleInput.value,
             sharp_projection: this.sharpProjectionInput.value,

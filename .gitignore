@@ -88,6 +88,7 @@ SHARP_INTEGRATION_REVIEW.md
 
 # Cloned model repos (not submodules)
 spag4d/panda_arch/PanDA/
+spag4d/da360_arch/DA360/
 
 # Test results
 test_results*.txt
