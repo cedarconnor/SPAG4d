@@ -27,6 +27,7 @@ safetensors>=0.4.0
 termcolor>=2.0
 omegaconf>=2.3
 
-# DA360 model dependencies (shares backbone with DAP)
-timm>=0.9.0
+# DA360 + SHARP model dependencies
+# SHARP requires timm>=1.0.0 for timm.models.VisionTransformer
+timm>=1.0.0
 
