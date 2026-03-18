@@ -2,7 +2,7 @@
 
 Convert 360° panoramic photos into explorable 3D Gaussian Splat scenes.
 
-SPAG-4D takes an equirectangular panorama, estimates depth with [DAP](https://github.com/Insta360-Research-Team/DAP) or [DA360](https://github.com/Insta360-Research-Team/DA360), and converts it into a 3D Gaussian Splat using spherical projection. For higher quality, optional per-face [ML-SHARP](https://github.com/apple/ml-sharp) refinement is available.
+SPAG-4D takes an equirectangular panorama, estimates depth with [DA360](https://github.com/Insta360-Research-Team/DA360) (default) or [DAP](https://github.com/Insta360-Research-Team/DAP), and converts it into a 3D Gaussian Splat using spherical projection. One Gaussian per pixel, colors taken directly from the source image, geometry from the depth model. Fast, accurate, no stitching artifacts.
 
 <p align="center">
   <img src="assets/demo.gif" alt="SPAG-4D demo — panorama to 3D Gaussian splat" width="720">
@@ -25,29 +25,17 @@ See [INSTALL.md](INSTALL.md) for the full walkthrough and troubleshooting.
 
 ## How It Works
 
-SPAG-4D supports two pipeline modes:
-
-### SPAG Mode (Default -- Fast)
-
 ```
-360° panorama
-  -> Depth estimation (DAP or DA360)
-  -> Spherical projection: depth * ray_direction = 3D positions
-  -> Colors from panorama pixels (sRGB), latitude-aware scales
+360° equirectangular panorama
+  -> DA360 depth estimation (scale-invariant, circular-padding DPT)
+  -> Spherical projection: depth * ray_direction = 3D Gaussian positions
+  -> Colors sampled directly from source pixels (sRGB)
+  -> Latitude-aware Gaussian scales, normal-aligned rotations
   -> Sky detection + pole thinning
-  -> PLY export (~2s on GPU)
+  -> Standard PLY export
 ```
 
-### SHARP Refined Mode (Optional -- Higher Quality)
-
-```
-360° panorama
-  -> Depth estimation (DAP or DA360)
-  -> Project onto cubemap/icosahedral faces
-  -> Per-face SHARP inference (~1.18M Gaussians per face)
-  -> Depth alignment + world-frame rotation + Voronoi merge
-  -> PLY export (~60s+ on GPU)
-```
+Each pixel in the panorama becomes one Gaussian splat (at stride=1) or every Nth pixel (at stride=2, 4, etc.). The depth model provides geometry, the source image provides color. No face stitching, no seam artifacts.
 
 The output is a standard `.ply` file compatible with [SuperSplat](https://playcanvas.com/supersplat/editor), [gsplat](https://docs.gsplat.studio/), Blender, and any 3DGS viewer. SPAG-4D includes a built-in web viewer powered by [GaussianSplats3D](https://github.com/mkkellogg/GaussianSplats3D).
 
@@ -72,20 +60,17 @@ Upload a 360° image, adjust settings, click **Convert**, and explore the result
 ### Command Line
 
 ```bash
-# SPAG mode (fast, default)
+# Default (DA360 depth + SPAG conversion)
 python -m spag4d convert panorama.jpg output.ply
 
-# Max quality SPAG (one Gaussian per pixel)
+# Max quality (one Gaussian per pixel)
 python -m spag4d convert panorama.jpg output.ply --stride 1
 
 # Fast preview
 python -m spag4d convert panorama.jpg output.ply --stride 4
 
-# Use DA360 depth model instead of DAP
-python -m spag4d convert panorama.jpg output.ply --depth-model da360
-
-# SHARP refined mode (higher quality, slower)
-python -m spag4d convert panorama.jpg output.ply --sharp-refine
+# Use DAP depth model instead of DA360
+python -m spag4d convert panorama.jpg output.ply --depth-model dap
 
 # Batch convert a folder
 python -m spag4d convert input_dir/ output_dir/ --batch
@@ -99,17 +84,12 @@ python -m spag4d download-models
 ```python
 from spag4d import SPAG4D
 
-# SPAG mode (fast)
 converter = SPAG4D(device="cuda")
 result = converter.convert("panorama.jpg", "output.ply", stride=2)
 
-# SHARP refined mode
-converter = SPAG4D(device="cuda", sharp_refine=True)
-result = converter.convert("panorama.jpg", "output_sharp.ply")
-
-# DA360 depth model
-converter = SPAG4D(device="cuda", depth_model="da360")
-result = converter.convert("panorama.jpg", "output_da360.ply")
+# DAP depth model
+converter = SPAG4D(device="cuda", depth_model="dap")
+result = converter.convert("panorama.jpg", "output_dap.ply")
 
 print(f"{result.splat_count:,} Gaussians in {result.processing_time:.1f}s")
 ```
@@ -120,23 +100,35 @@ print(f"{result.splat_count:,} Gaussians in {result.processing_time:.1f}s")
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `depth_model` | `dap` | Depth model: `dap` (metric depth) or `da360` (circular padding DPT) |
-| `sharp_refine` | `false` | Enable SHARP per-face refinement (slower, higher quality) |
-| `stride` | `2` | SPAG pixel stride: `1`=full density, `2`=quarter, `4`=sixteenth |
+| `depth_model` | `da360` | Depth model: `da360` (recommended) or `dap` (metric depth) |
+| `stride` | `2` | Pixel stride: `1`=full density, `2`=quarter, `4`=sixteenth |
 | `depth_min` | `0.1` | Clip geometry closer than this (meters) |
 | `depth_max` | `100.0` | Clip geometry farther than this (meters) |
 | `sky_threshold` | `80.0` | Depth cutoff for sky removal (0 = keep everything) |
 | `outlier_pruning` | `0.0` | Statistical outlier removal (0 = off, 1 = aggressive) |
 | `global_scale` | `1.0` | Multiply all depths by this factor |
 
-### SPAG Stride Guide
+### Stride Guide
 
 | Stride | Gaussians (4096x2048 input) | File Size | Speed |
 |--------|----------------------------|-----------|-------|
-| 1 | ~1.3M | ~85 MB | ~2s |
-| 2 | ~350K | ~23 MB | ~0.3s |
-| 4 | ~85K | ~5.5 MB | ~0.1s |
-| 8 | ~21K | ~1.4 MB | ~0.1s |
+| 1 | ~5.6M | ~362 MB | ~3s |
+| 2 | ~1.4M | ~90 MB | ~1s |
+| 4 | ~350K | ~23 MB | ~0.3s |
+| 8 | ~85K | ~5.5 MB | ~0.1s |
+
+---
+
+## Depth Models
+
+| Model | Default | Description |
+|-------|---------|-------------|
+| **DA360** | Yes | Depth Anything V2 with circular-padding DPT decoder. Seamless 360° depth with no boundary artifacts. Produces superior results in most scenes. |
+| **DAP** | No | Depth Any Panorama. Outputs metric radial depth. Alternative option. |
+
+Both models download weights automatically on first use (~1.3-1.5 GB each).
+
+> **Note on SHARP refinement:** An experimental `--sharp-refine` flag exists that runs Apple's [ML-SHARP](https://github.com/apple/ml-sharp) per-face neural inference. In practice, SHARP refinement produces lower quality than the default SPAG mode for panoramic scenes -- it generates fewer splats, introduces face-boundary artifacts, and takes 20x longer. It is retained for research/testing only.
 
 ---
 
@@ -150,15 +142,12 @@ source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements.txt
 
-# DAP depth model architecture
-git submodule update --init --recursive
-# Or: git clone https://github.com/Insta360-Research-Team/DAP spag4d/dap_arch/DAP
-
-# DA360 depth model architecture (optional)
+# DA360 depth model (recommended)
 git clone https://github.com/Insta360-Research-Team/DA360 spag4d/da360_arch/DA360
 
-# ML-SHARP (optional, only needed for --sharp-refine)
-pip install --no-deps https://github.com/apple/ml-sharp/archive/refs/heads/main.zip
+# DAP depth model
+git submodule update --init --recursive
+# Or: git clone https://github.com/Insta360-Research-Team/DAP spag4d/dap_arch/DAP
 
 # Download model weights
 python -m spag4d download-models
@@ -166,31 +155,20 @@ python -m spag4d download-models
 
 ---
 
-## Depth Models
-
-| Model | Output | Best For |
-|-------|--------|----------|
-| **DAP** | Metric radial depth (meters) | General 360° scenes, consistent scale |
-| **DA360** | Scale-invariant disparity | Circular-padding continuity, research comparison |
-
-Both models download weights automatically on first use (~1.5 GB each).
-
----
-
 ## Project Structure
 
 ```
 spag4d/
-├── core.py                      # Pipeline orchestrator (SPAG + SHARP modes)
-├── spag_converter.py            # SPAG: depth-to-Gaussian spherical projection
-├── sharp_gaussian_pipeline.py   # SHARP: per-face inference + merge (optional)
+├── core.py                      # Pipeline orchestrator
+├── spag_converter.py            # Depth-to-Gaussian spherical projection
 ├── dap_model.py                 # DAP depth estimation
-├── da360_model.py               # DA360 depth estimation
-├── projection.py                # Cubemap + icosahedral projectors
-├── ply_writer.py                # PLY export (sRGB + linearRGB paths)
+├── da360_model.py               # DA360 depth estimation (default)
+├── ply_writer.py                # PLY export (sRGB SH0 encoding)
 ├── scene_filter.py              # Sky detection, pole thinning, outlier pruning
 ├── spherical_grid.py            # 360° coordinate math
-└── cli.py                       # CLI commands
+├── cli.py                       # CLI commands
+├── sharp_gaussian_pipeline.py   # SHARP per-face inference (experimental)
+└── projection.py                # Cubemap + icosahedral projectors (SHARP only)
 
 api.py                           # FastAPI web server
 static/
@@ -206,16 +184,14 @@ static/
 | Problem | Solution |
 |---------|----------|
 | `No module named 'spag4d.dap_arch.DAP.networks'` | `git submodule update --init --recursive` |
-| CUDA out of memory | Use `--stride 4` or `--sharp-cubemap-size 768` |
-| SHARP not found | `pip install --no-deps https://github.com/apple/ml-sharp/archive/refs/heads/main.zip` |
 | DA360 not found | `git clone https://github.com/Insta360-Research-Team/DA360 spag4d/da360_arch/DA360` |
+| CUDA out of memory | Use `--stride 4` or lower input image resolution |
 | Port 7860 in use | Edit `run.bat` and change the port |
 
 ## References
 
-- [DAP -- Depth Any Panorama](https://github.com/Insta360-Research-Team/DAP)
 - [DA360 -- Depth Anything in 360](https://github.com/Insta360-Research-Team/DA360)
-- [ML-SHARP -- Apple](https://github.com/apple/ml-sharp)
+- [DAP -- Depth Any Panorama](https://github.com/Insta360-Research-Team/DAP)
 - [GaussianSplats3D](https://github.com/mkkellogg/GaussianSplats3D)
 - [3D Gaussian Splatting](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/)
 
