@@ -1508,103 +1508,33 @@ class SHARPGaussianPipeline:
             all_colors.append(colors)
             all_opacities.append(opacities)
 
-        # --- Clamp DAP outliers (fix sky/degenerate faces) ---
-        # Per-face DAP alignment gives wildly different scales (e.g. 3x ground
-        # vs 20x sky). Only clamp OUTLIER faces (>2x from median) — don't
-        # normalize all faces, since legitimate depth differences exist.
+        # --- Global uniform scale alignment ---
+        # Use a SINGLE global scale for ALL faces to ensure consistent geometry.
+        # Per-face DAP alignment gives different scales per face because SHARP
+        # produces geometrically inconsistent Gaussians. Applying per-face scales
+        # causes visible seam misalignment. Instead: take the median scale and
+        # apply it uniformly, then let Voronoi ownership handle the boundaries.
         if len(face_scale_factors) > 1 and len(all_means) > 1:
             sf = np.array(face_scale_factors)
-            # Robust median excluding clamped values
             non_clamped = sf[sf < 19.9]
             if len(non_clamped) >= 2:
-                target_scale = float(np.median(non_clamped))
+                global_scale_factor = float(np.median(non_clamped))
             else:
-                target_scale = float(np.median(sf))
+                global_scale_factor = float(np.median(sf))
 
-            print(f"[SHARP-Direct] DAP scale factors: "
+            print(f"[SHARP-Direct] Per-face DAP scales: "
                   f"[{', '.join(f'{s:.2f}' for s in sf)}]")
-            print(f"[SHARP-Direct] Median DAP scale (non-clamped): {target_scale:.2f}")
+            print(f"[SHARP-Direct] Using GLOBAL median scale: {global_scale_factor:.3f} "
+                  f"(range was {sf.min():.2f}-{sf.max():.2f})")
 
-            # Only correct faces that are >2x away from median
+            # Undo per-face scale, apply global scale
             for i in range(len(all_means)):
-                if i >= len(sf):
+                if i >= len(sf) or all_means[i].shape[0] == 0:
                     continue
-                ratio = sf[i] / target_scale
-                if ratio > 2.0:
-                    # Scale too large — clamp down to 2x median
-                    c = (target_scale * 2.0) / sf[i]
-                    all_means[i] = all_means[i] * c
-                    all_scales[i] = all_scales[i] * c
-                    print(f"[SHARP-Direct]   Face {i}: clamped from {sf[i]:.2f}x to "
-                          f"{sf[i]*c:.2f}x (correction={c:.3f})")
-                elif ratio < 0.5:
-                    # Scale too small — clamp up to 0.5x median
-                    c = (target_scale * 0.5) / sf[i]
-                    all_means[i] = all_means[i] * c
-                    all_scales[i] = all_scales[i] * c
-                    print(f"[SHARP-Direct]   Face {i}: clamped from {sf[i]:.2f}x to "
-                          f"{sf[i]*c:.2f}x (correction={c:.3f})")
-
-        # --- Pairwise overlap alignment (fine-tune using SHARP-to-SHARP) ---
-        # After DAP outlier clamping, remaining face-to-face differences are
-        # typically 10-50%. The global solver fixes these using SHARP-to-SHARP
-        # comparison in overlap zones. Exclude unreliable faces (sky/clamped)
-        # since their contradictory overlap measurements poison the system.
-        unreliable_faces = set()
-        if len(face_scale_factors) > 1:
-            sf = np.array(face_scale_factors)
-            for i, s in enumerate(sf):
-                if s >= 19.9:  # hit safety clamp = unreliable
-                    unreliable_faces.add(i)
-
-        # --- SIFT feature-point matching for pairwise depth ratios ---
-        # Compute effective scale factors (accounting for DAP outlier clamping)
-        effective_sf = list(face_scale_factors)
-        if len(face_scale_factors) > 1 and len(all_means) > 1:
-            sf = np.array(face_scale_factors)
-            non_clamped = sf[sf < 19.9]
-            target_scale = float(np.median(non_clamped)) if len(non_clamped) >= 2 else float(np.median(sf))
-            for i in range(min(len(effective_sf), len(all_means))):
-                ratio = sf[i] / target_scale
-                if ratio > 2.0:
-                    effective_sf[i] = target_scale * 2.0
-                elif ratio < 0.5:
-                    effective_sf[i] = target_scale * 0.5
-
-        sift_ratios = None
-        if len(all_means) > 1 and face_depth_maps:
-            print(f"[SHARP-Direct] Running SIFT feature matching...")
-            t0 = time.time()
-            sift_ratios = _feature_match_pairwise_ratios(
-                faces_list, face_depth_maps, effective_sf,
-                self.cubemap_size, grid_size,
-                self.projector.face_fov, all_face_forwards,
-                exclude_faces=unreliable_faces,
-            )
-            print(f"[SHARP-Direct] SIFT matching done in {time.time() - t0:.1f}s "
-                  f"({len(sift_ratios) if sift_ratios else 0} pairs)")
-
-        if len(all_means) > 1:
-            print(f"[SHARP-Direct] Running pairwise overlap alignment...")
-            t0 = time.time()
-            _global_scale_alignment(
-                all_means, all_scales, all_face_forwards,
-                self.projector.face_fov,
-                dap_depth_np=dap_np, erp_H=H, erp_W=W,
-                exclude_faces=unreliable_faces,
-                feature_ratios=sift_ratios,
-            )
-            print(f"[SHARP-Direct] Pairwise alignment done in {time.time() - t0:.1f}s")
-
-        # --- Spatially-varying depth correction (pre-Voronoi) ---
-        if len(all_means) > 1 and face_depth_maps:
-            t0 = time.time()
-            _spatially_varying_depth_correction(
-                all_means, all_scales,
-                face_depth_maps, face_rotations, all_face_forwards,
-                self.projector.face_fov, grid_size,
-            )
-            print(f"[SHARP-Direct] Spatial depth correction done in {time.time() - t0:.1f}s")
+                correction = global_scale_factor / sf[i]
+                if abs(correction - 1.0) > 0.001:
+                    all_means[i] = all_means[i] * correction
+                    all_scales[i] = all_scales[i] * correction
 
         # --- Apply Voronoi ownership + sky filter per face ---
         owned_means = []
