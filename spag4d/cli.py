@@ -20,7 +20,7 @@ def main():
 @click.option('--depth-model', type=click.Choice(['dap', 'da360']),
               default='da360', help='Depth estimation model (default: da360)')
 @click.option('--sharp-refine', is_flag=True,
-              help='Enable SHARP per-face refinement (slower, higher quality)')
+              help='Experimental: SHARP per-face refinement (slower, may not improve quality)')
 @click.option('--stride', type=int, default=2,
               help='SPAG pixel stride: 1=full, 2=quarter, 4=sixteenth (SPAG mode only)')
 @click.option('--depth-min', default=0.1, help='Minimum depth in meters')

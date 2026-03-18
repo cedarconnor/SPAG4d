@@ -92,8 +92,8 @@
                     <dd><strong>DAP</strong> = metric depth, designed for 360°. <strong>DA360</strong>
                         = scale-invariant disparity with circular padding.</dd>
 
-                    <dt>SHARP Refine</dt>
-                    <dd>Enable per-face SHARP refinement for higher quality (slower). Off = fast SPAG mode.</dd>
+                    <dt>SHARP (experimental)</dt>
+                    <dd>Per-face SHARP neural refinement. Experimental — SPAG mode typically produces better results.</dd>
 
                     <dt>Stride</dt>
                     <dd>SPAG pixel stride. 1 = one Gaussian per pixel (max quality), 2 = quarter density (default), 4 = fast preview.</dd>
@@ -149,8 +149,8 @@
                     </div>
 
                     <div class="param-group"
-                        title="Enable SHARP per-face refinement for higher quality (slower).">
-                        <label for="sharp-refine">SHARP Refine</label>
+                        title="Experimental: SHARP per-face refinement. May reduce quality vs SPAG default.">
+                        <label for="sharp-refine">SHARP (exp.)</label>
                         <input type="checkbox" id="sharp-refine">
                     </div>
 
