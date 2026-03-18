@@ -29,6 +29,23 @@ def _ensure_da360_on_path():
     sys.path.insert(0, da360_str)
 
 
+def _flush_conflicting_modules():
+    """
+    Purge cached 'networks' and 'depth_anything_v2' modules from sys.modules.
+
+    DAP and DA360 both have their own 'networks' package. If DAP was loaded
+    first, Python caches DAP's 'networks' module, causing DA360's
+    'from networks.da360 import DA360' to fail. Flushing these entries
+    forces a fresh import from the now-correct sys.path.
+    """
+    stale_prefixes = ('networks', 'depth_anything_v2')
+    for key in list(sys.modules.keys()):
+        for prefix in stale_prefixes:
+            if key == prefix or key.startswith(prefix + '.'):
+                del sys.modules[key]
+                break
+
+
 _ensure_da360_on_path()
 
 
@@ -43,6 +60,7 @@ def build_da360_model(encoder: str = 'vitl'):
         nn.Module: DA360 model ready for weight loading
     """
     _ensure_da360_on_path()
+    _flush_conflicting_modules()
 
     if not DA360_DIR.exists():
         raise ImportError(
@@ -59,9 +77,6 @@ def build_da360_model(encoder: str = 'vitl'):
 
         from networks.da360 import DA360
 
-        # DA360 constructor takes dinov2_encoder=, not encoder=
-        # Set pretrained weights path to nonexistent so it skips
-        # the hardcoded load (we load weights ourselves in da360_model.py)
         model = DA360(
             equi_h=518,
             equi_w=1036,
