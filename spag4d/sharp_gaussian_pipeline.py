@@ -1508,33 +1508,13 @@ class SHARPGaussianPipeline:
             all_colors.append(colors)
             all_opacities.append(opacities)
 
-        # --- Global uniform scale alignment ---
-        # Use a SINGLE global scale for ALL faces to ensure consistent geometry.
-        # Per-face DAP alignment gives different scales per face because SHARP
-        # produces geometrically inconsistent Gaussians. Applying per-face scales
-        # causes visible seam misalignment. Instead: take the median scale and
-        # apply it uniformly, then let Voronoi ownership handle the boundaries.
-        if len(face_scale_factors) > 1 and len(all_means) > 1:
+        # --- Per-Gaussian depth alignment diagnostics ---
+        if len(face_scale_factors) > 1:
             sf = np.array(face_scale_factors)
-            non_clamped = sf[sf < 19.9]
-            if len(non_clamped) >= 2:
-                global_scale_factor = float(np.median(non_clamped))
-            else:
-                global_scale_factor = float(np.median(sf))
-
-            print(f"[SHARP-Direct] Per-face DAP scales: "
+            print(f"[SHARP-Direct] Per-face median depth ratios: "
                   f"[{', '.join(f'{s:.2f}' for s in sf)}]")
-            print(f"[SHARP-Direct] Using GLOBAL median scale: {global_scale_factor:.3f} "
-                  f"(range was {sf.min():.2f}-{sf.max():.2f})")
-
-            # Undo per-face scale, apply global scale
-            for i in range(len(all_means)):
-                if i >= len(sf) or all_means[i].shape[0] == 0:
-                    continue
-                correction = global_scale_factor / sf[i]
-                if abs(correction - 1.0) > 0.001:
-                    all_means[i] = all_means[i] * correction
-                    all_scales[i] = all_scales[i] * correction
+            print(f"[SHARP-Direct] Median ratio: {np.median(sf):.3f} "
+                  f"(range {sf.min():.2f}-{sf.max():.2f})")
 
         # --- Apply Voronoi ownership + sky filter per face ---
         owned_means = []
@@ -1695,20 +1675,19 @@ class SHARPGaussianPipeline:
         H: int, W: int,
         scales_cam: torch.Tensor,
     ) -> Tuple[torch.Tensor, float]:
-        """Align per-face Gaussian depths to DAP metric reference.
+        """Replace per-Gaussian depths with depth model values.
 
-        Computes a single robust scale factor per face (log-median matching),
-        then applies it to all positions and scales.
-        Uses bilinear interpolation for DAP sampling.
+        Each Gaussian's radial distance is replaced with the depth model's
+        depth at that direction. Forces all faces to share the same geometry
+        while preserving SHARP's colors, opacities, and relative scales.
 
         Returns:
-            (means_cam_scaled, scale_factor) — the aligned means and the
-            scale factor used, so the caller can do global consistency correction.
+            (means_cam_aligned, median_ratio) — aligned positions and
+            the median scale ratio (for diagnostics).
         """
-        # Radial distance (euclidean norm) to match DAP's radial depth convention
-        # DAP depth = distance along the ray, not the Z-component in camera space.
-        # Using z_cam would bias scale at face edges where radial = z / cos(angle).
-        r_cam = means_cam.norm(dim=-1).cpu().numpy()
+        device = means_cam.device
+        r_cam = means_cam.norm(dim=-1)  # [N] keep on GPU
+        r_cam_np = r_cam.cpu().numpy()
 
         # Project Gaussian positions to ERP to sample DAP
         fwd = np.asarray(self.projector.face_directions[face_idx], dtype=np.float32)
@@ -1747,25 +1726,32 @@ class SHARPGaussianPipeline:
             dap_np[row1, col1] * fr * fc
         )
 
-        # Log-median scale alignment (robust to outliers)
-        valid = (r_cam > 0.1) & (dap_sampled > 0.1)
+        # Per-Gaussian depth replacement: move each Gaussian to the depth
+        # model's depth along its current direction
+        valid = (r_cam_np > 0.1) & (dap_sampled > 0.1)
         if valid.sum() < 10:
-            print(f"[SHARP-Direct]   DAP align face {face_idx}: only {valid.sum()} valid samples, skipping")
-            return means_cam, 1.0  # not enough overlap, skip alignment
+            print(f"[SHARP-Direct]   Depth align face {face_idx}: only {valid.sum()} valid, skipping")
+            return means_cam, 1.0
 
-        log_ratio = np.log(dap_sampled[valid]) - np.log(r_cam[valid])
-        scale_factor = float(np.exp(np.median(log_ratio)))
-        scale_factor = np.clip(scale_factor, 0.05, 20.0)  # safety clamp
-        sharp_median = float(np.median(r_cam[valid]))
+        # Per-Gaussian ratio: depth_model_depth / sharp_depth
+        per_gaussian_ratio = np.ones(len(r_cam_np), dtype=np.float32)
+        per_gaussian_ratio[valid] = dap_sampled[valid] / r_cam_np[valid]
+        per_gaussian_ratio = np.clip(per_gaussian_ratio, 0.1, 10.0)
+
+        ratio_t = torch.from_numpy(per_gaussian_ratio).to(device)
+
+        # Scale positions along their direction and adjust Gaussian sizes
+        means_cam = means_cam * ratio_t.unsqueeze(-1)
+        scales_cam *= ratio_t.unsqueeze(-1)
+
+        median_ratio = float(np.median(per_gaussian_ratio[valid]))
+        sharp_median = float(np.median(r_cam_np[valid]))
         dap_median = float(np.median(dap_sampled[valid]))
-        print(f"[SHARP-Direct]   DAP align face {face_idx}: scale={scale_factor:.3f} "
-              f"(SHARP median radial={sharp_median:.1f}, DAP median={dap_median:.1f}, "
-              f"valid={valid.sum():,}/{len(r_cam):,})")
+        print(f"[SHARP-Direct]   Depth align face {face_idx}: median_ratio={median_ratio:.3f} "
+              f"(SHARP={sharp_median:.1f}m, depth_model={dap_median:.1f}m, "
+              f"valid={valid.sum():,}/{len(r_cam_np):,})")
 
-        # Apply to positions and scales
-        means_cam = means_cam * scale_factor
-        scales_cam *= scale_factor  # in-place (caller sees the change)
-        return means_cam, scale_factor
+        return means_cam, median_ratio
 
     def _overlap_scale_corrections(
         self,
