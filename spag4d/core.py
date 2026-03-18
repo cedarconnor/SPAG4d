@@ -39,7 +39,7 @@ class SPAG4D:
     def __init__(
         self,
         device: str = "cuda",
-        depth_model: str = "dap",
+        depth_model: str = "da360",
         model_path: Optional[str] = None,
         use_mock_dap: bool = False,
         sharp_refine: bool = False,

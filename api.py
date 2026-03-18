@@ -63,13 +63,18 @@ async def lifespan(app: FastAPI):
 
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Initialize with DAP, fall back to mock
+    # Initialize with DA360 (default), fall back to DAP, then mock
     try:
-        processor = SPAG4D(device="cuda")
-        print("Loaded DAP depth model")
+        processor = SPAG4D(device="cuda", depth_model="da360")
+        print("Loaded DA360 depth model")
     except Exception as e:
-        print(f"DAP model not available ({e}), using mock depth")
-        processor = SPAG4D(device="cuda", use_mock_dap=True)
+        print(f"DA360 not available ({e}), trying DAP...")
+        try:
+            processor = SPAG4D(device="cuda", depth_model="dap")
+            print("Loaded DAP depth model")
+        except Exception as e2:
+            print(f"DAP not available ({e2}), using mock depth")
+            processor = SPAG4D(device="cuda", use_mock_dap=True)
 
     gpu_semaphore = asyncio.Semaphore(GPU_SEMAPHORE_LIMIT)
     cleanup_task = asyncio.create_task(cleanup_loop())
@@ -154,7 +159,7 @@ async def add_coop_coep(request: Request, call_next):
 @app.post("/api/convert")
 async def convert_panorama(
     file: UploadFile = File(...),
-    depth_model: str = Query("dap", pattern="^(dap|da360)$"),
+    depth_model: str = Query("da360", pattern="^(dap|da360)$"),
     sharp_refine: bool = Query(False),
     stride: int = Query(2, ge=1, le=8),
     depth_min: float = Query(0.1, ge=0.01),

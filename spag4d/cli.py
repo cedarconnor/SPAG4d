@@ -18,7 +18,7 @@ def main():
 @click.argument('input_path', type=click.Path(exists=True))
 @click.argument('output_path', type=click.Path())
 @click.option('--depth-model', type=click.Choice(['dap', 'da360']),
-              default='dap', help='Depth estimation model')
+              default='da360', help='Depth estimation model (default: da360)')
 @click.option('--sharp-refine', is_flag=True,
               help='Enable SHARP per-face refinement (slower, higher quality)')
 @click.option('--stride', type=int, default=2,
