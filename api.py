@@ -154,7 +154,7 @@ async def add_coop_coep(request: Request, call_next):
 @app.post("/api/convert")
 async def convert_panorama(
     file: UploadFile = File(...),
-    depth_model: str = Query("dap", regex="^(dap|da360)$"),
+    depth_model: str = Query("dap", pattern="^(dap|da360)$"),
     sharp_refine: bool = Query(False),
     stride: int = Query(2, ge=1, le=8),
     depth_min: float = Query(0.1, ge=0.01),
@@ -260,6 +260,7 @@ async def process_job(
                 stride=stride,
                 outlier_pruning=outlier_pruning,
                 global_scale=global_scale,
+                depth_model=depth_model,
                 sharp_refine=sharp_refine,
                 sharp_projection=sharp_projection,
                 sharp_cubemap_size=sharp_cubemap_size,

@@ -50,22 +50,35 @@ class SPAG4D:
             device if device != "cuda" or torch.cuda.is_available() else "cpu"
         )
 
-        # Load depth model
-        self.depth_model_name = depth_model
-        if use_mock_dap:
-            from .dap_model import MockDAPModel
-            self.depth = MockDAPModel.load(device=self.device)
-        elif depth_model == "da360":
-            from .da360_model import DA360Model
-            self.depth = DA360Model.load(model_path, device=self.device)
-        else:
-            from .dap_model import DAPModel
-            self.depth = DAPModel.load(model_path, device=self.device)
+        self.default_depth_model = depth_model
+        self.use_mock_dap = use_mock_dap
+        self._depth_models = {}  # lazy-loaded cache: name -> model
+
+        # Eagerly load the default depth model
+        self._get_depth_model(depth_model)
 
         self.sharp_refine = sharp_refine
         self.sharp_cubemap_size = sharp_cubemap_size
         self.sharp_projection_mode = sharp_projection_mode
         self._sharp_pipeline = None
+
+    def _get_depth_model(self, name: str):
+        """Get or lazy-load a depth model by name."""
+        if name in self._depth_models:
+            return self._depth_models[name]
+
+        if self.use_mock_dap:
+            from .dap_model import MockDAPModel
+            model = MockDAPModel.load(device=self.device)
+        elif name == "da360":
+            from .da360_model import DA360Model
+            model = DA360Model.load(device=self.device)
+        else:
+            from .dap_model import DAPModel
+            model = DAPModel.load(device=self.device)
+
+        self._depth_models[name] = model
+        return model
 
     def convert(
         self,
@@ -78,6 +91,7 @@ class SPAG4D:
         outlier_pruning: float = 0.0,
         global_scale: float = 1.0,
         force_erp: bool = False,
+        depth_model: Optional[str] = None,
         sharp_refine: Optional[bool] = None,
         sharp_projection: Optional[str] = None,
         sharp_cubemap_size: Optional[int] = None,
@@ -97,6 +111,7 @@ class SPAG4D:
             outlier_pruning: Statistical outlier removal strength (0=off, 1=aggressive)
             global_scale: Manual depth scale multiplier
             force_erp: Process even if aspect ratio isn't 2:1
+            depth_model: Override depth model ("dap" or "da360")
             sharp_refine: Override instance-level SHARP refinement setting
             sharp_projection: Override projection mode ("cubemap" or "icosahedral")
             sharp_cubemap_size: Override cubemap face size
@@ -126,10 +141,12 @@ class SPAG4D:
         image_tensor = torch.from_numpy(np.array(img)).to(self.device)
 
         # Estimate depth
-        print(f"[SPAG4D] Running {self.depth_model_name.upper()} depth estimation...", flush=True)
+        dm_name = depth_model or self.default_depth_model
+        depth_engine = self._get_depth_model(dm_name)
+        print(f"[SPAG4D] Running {dm_name.upper()} depth estimation...", flush=True)
         t_depth = time.time()
         with torch.inference_mode():
-            depth_raw, _ = self.depth.predict(image_tensor)
+            depth_raw, _ = depth_engine.predict(image_tensor)
         depth = depth_raw * global_scale
         print(f"[SPAG4D] Depth estimation complete in {time.time() - t_depth:.1f}s")
 
