@@ -31,4 +31,5 @@ class RefineResult:
     round_stats: List[RoundStats] = field(default_factory=list)
     total_elapsed_seconds: float = 0.0
     synthesis_backend_used: str = ""
+    heatmap_path: Optional[Path] = None
     warnings: List[str] = field(default_factory=list)

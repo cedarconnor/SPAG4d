@@ -227,40 +227,60 @@
                         <span class="btn-icon">🔧</span>
                         Refine
                     </button>
+                    <button id="toggle-heatmap-btn" class="action-btn" disabled title="Toggle provenance heatmap">
+                        <span class="btn-icon">🎨</span>
+                        Heatmap
+                    </button>
                     <button id="download-refined-btn" class="action-btn" disabled>
                         <span class="btn-icon">💾</span>
                         Refined PLY
                     </button>
                 </div>
                 <div class="params-row">
-                    <div class="param-group" title="Orbit radius around panorama center (meters)">
-                        <label for="orbit-radius">Orbit Radius (m)</label>
-                        <input type="number" id="orbit-radius" value="0.5" min="0.05" max="5" step="0.05">
-                    </div>
-                    <div class="param-group" title="Number of viewpoints around the orbit">
-                        <label for="n-cameras">Cameras</label>
-                        <select id="n-cameras">
-                            <option value="4">4</option>
-                            <option value="8" selected>8</option>
-                            <option value="12">12</option>
-                            <option value="16">16</option>
+                    <div class="param-group" title="Camera placement strategy for refinement">
+                        <label for="camera-preset">Camera Mode</label>
+                        <select id="camera-preset">
+                            <option value="orbit" selected>Orbit</option>
+                            <option value="orbit_above">Orbit + Above</option>
+                            <option value="orbit_below">Orbit + Below</option>
+                            <option value="full_sphere">Full Sphere</option>
+                            <option value="custom">Custom</option>
                         </select>
                     </div>
-                    <div class="param-group" title="Maximum refinement rounds (each round refines further)">
+                    <div id="preset-params" class="param-group-row">
+                        <div class="param-group" title="Orbit radius around panorama center (meters)">
+                            <label for="orbit-radius">Radius (m)</label>
+                            <input type="number" id="orbit-radius" value="0.5" min="0.05" max="5" step="0.05">
+                        </div>
+                        <div class="param-group" title="Number of viewpoints">
+                            <label for="n-cameras">Cameras</label>
+                            <select id="n-cameras">
+                                <option value="4">4</option>
+                                <option value="8" selected>8</option>
+                                <option value="12">12</option>
+                                <option value="16">16</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div id="custom-camera-controls" style="display: none;">
+                        <button id="add-camera-btn" class="sm-btn" title="Capture current viewpoint">+ Add Camera</button>
+                        <span id="custom-camera-count" class="camera-count">0 cameras</span>
+                        <button id="clear-cameras-btn" class="sm-btn" title="Remove all custom cameras">Clear</button>
+                    </div>
+                    <div class="param-group" title="Maximum refinement rounds">
                         <label for="max-rounds">Rounds</label>
                         <select id="max-rounds">
-                            <option value="1">1</option>
-                            <option value="2" selected>2</option>
+                            <option value="1" selected>1</option>
+                            <option value="2">2</option>
                             <option value="3">3</option>
                         </select>
                     </div>
-                    <div class="param-group" title="AI synthesis backend for gap filling">
-                        <label for="synth-backend">Synthesis</label>
-                        <select id="synth-backend">
-                            <option value="klein-sharp" selected>Klein + LoRA</option>
-                            <option value="flux-fill">FLUX Fill</option>
-                        </select>
-                    </div>
+                </div>
+                <!-- Heatmap legend -->
+                <div id="heatmap-legend" class="heatmap-legend" style="display: none;">
+                    <span class="legend-item"><span class="dot blue"></span> Original</span>
+                    <span class="legend-item"><span class="dot green"></span> Promoted</span>
+                    <span class="legend-item"><span class="dot yellow"></span> Seeded</span>
                 </div>
                 <!-- Refinement progress -->
                 <div id="refine-status" class="refine-status" style="display: none;">

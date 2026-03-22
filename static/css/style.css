@@ -728,6 +728,69 @@ body {
     min-width: 0;
 }
 
+.param-group-row {
+    display: flex;
+    gap: var(--spacing-md);
+    flex: 2;
+}
+
+#custom-camera-controls {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    flex: 2;
+}
+
+.sm-btn {
+    padding: 4px 10px;
+    font-size: 0.7rem;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    background: var(--bg-glass);
+    color: var(--text-primary);
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.sm-btn:hover {
+    border-color: var(--accent-primary);
+}
+
+.camera-count {
+    font-size: 0.75rem;
+    color: var(--accent-secondary);
+    min-width: 70px;
+}
+
+.action-btn.active {
+    border-color: var(--accent-primary);
+    background: rgba(138, 92, 246, 0.25);
+}
+
+.heatmap-legend {
+    display: flex;
+    gap: var(--spacing-lg);
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    padding: var(--spacing-xs) 0;
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.legend-item .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+}
+.dot.blue { background: #3355ee; }
+.dot.yellow { background: #e6d911; }
+.dot.green { background: #1ad933; }
+
 .refine-status {
     display: flex;
     align-items: center;

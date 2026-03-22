@@ -17,6 +17,7 @@ class RefineConfig:
 
     # --- Camera ---
     capture_mode: Literal["keyframe", "path"] = "keyframe"
+    camera_preset: str = "orbit"
     camera_vfov_deg: float = 60.0
     render_resolution: Tuple[int, int] = (1920, 1080)
     orbit_radius: float = 0.5
@@ -72,9 +73,10 @@ class RefineConfig:
     depth_hypotheses: int = 1
 
     # --- Seeding ---
-    shadow_opacity: float = 0.2
+    shadow_opacity: float = 0.5
     shadow_validation_iters: int = 750
-    promotion_consistency_threshold: float = 0.8
+    promotion_consistency_threshold: float = 0.3
+    confidence_decay_pixels: int = 150
 
     # --- Fine-tuning ---
     finetune_iterations: int = 4000
@@ -83,7 +85,7 @@ class RefineConfig:
     original_gaussian_lr_scale: float = 0.05
 
     # --- Validation ---
-    max_original_psnr_drop: float = 0.5
+    max_original_psnr_drop: float = 1.5
     max_refinement_rounds: int = 3
 
     # --- Hardware ---

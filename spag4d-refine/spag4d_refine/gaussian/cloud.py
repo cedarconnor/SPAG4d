@@ -177,6 +177,31 @@ class GaussianCloud:
         el = PlyElement.describe(data, "vertex")
         PlyData([el], text=False).write(str(path))
 
+    # Provenance → color mapping for heatmap visualization
+    _PROVENANCE_COLORS = {
+        int(GaussianSource.ORIGINAL): np.array([0.2, 0.3, 0.9], dtype=np.float32),
+        int(GaussianSource.SEEDED):   np.array([0.9, 0.85, 0.1], dtype=np.float32),
+        int(GaussianSource.PROMOTED): np.array([0.1, 0.85, 0.2], dtype=np.float32),
+        int(GaussianSource.PRUNED):   np.array([0.9, 0.1, 0.1], dtype=np.float32),
+    }
+
+    def to_heatmap_ply(self, path: str | Path) -> None:
+        """Save PLY with colors encoding provenance (blue=original, green=promoted, yellow=seeded)."""
+        colors = np.zeros((len(self), 3), dtype=np.float32)
+        for source_int, color in self._PROVENANCE_COLORS.items():
+            mask = self.provenance == source_int
+            colors[mask] = color
+
+        heatmap = GaussianCloud(
+            means=self.means,
+            scales=self.scales,
+            quats=self.quats,
+            colors=colors,
+            opacities=self.opacities,
+            provenance=self.provenance,
+        )
+        heatmap.to_ply(path, colors_linear=False)
+
     def to_gsplat(self) -> dict:
         """
         Convert to gsplat-compatible tensors.

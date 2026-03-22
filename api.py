@@ -67,6 +67,7 @@ class RefineJobInfo:
         self.stage = ""
         self.progress_pct = 0
         self.output_ply_path: Optional[Path] = None
+        self.heatmap_ply_path: Optional[Path] = None
         self.diagnostics_dir: Optional[Path] = None
         self.metrics: dict = {}
         self.error: Optional[str] = None
@@ -403,6 +404,8 @@ async def start_refinement(
     n_cameras: int = Query(8, ge=2, le=32),
     max_rounds: int = Query(2, ge=1, le=5),
     synthesis_backend: str = Query("klein-sharp"),
+    camera_preset: str = Query("orbit"),
+    custom_cameras: Optional[str] = Query(None, description="JSON array of custom camera poses"),
 ):
     """Start refinement on an existing conversion job."""
     if job_id not in jobs:
@@ -427,8 +430,11 @@ async def start_refinement(
         "n_cameras": n_cameras,
         "max_rounds": max_rounds,
         "synthesis_backend": synthesis_backend,
+        "camera_preset": camera_preset,
+        "custom_cameras": custom_cameras,
     }
     refine_job.output_ply_path = TEMP_DIR / f"{refine_id}_refined.ply"
+    refine_job.heatmap_ply_path = TEMP_DIR / f"{refine_id}_heatmap.ply"
     refine_job.diagnostics_dir = TEMP_DIR / f"{refine_id}_diagnostics"
     refine_jobs[refine_id] = refine_job
 
@@ -488,7 +494,29 @@ def _run_refinement(source_job: JobInfo, refine_job: RefineJobInfo) -> dict:
         synthesis_backend=params.get("synthesis_backend", "klein-sharp"),
         orbit_radius=params.get("orbit_radius", 0.5),
         n_cameras=params.get("n_cameras", 8),
+        camera_preset=params.get("camera_preset", "orbit"),
     )
+
+    # Build custom cameras if provided
+    custom_camera_set = None
+    custom_cameras_json = params.get("custom_cameras")
+    if params.get("camera_preset") == "custom" and custom_cameras_json:
+        import json as json_mod
+        from spag4d_refine.camera.pinhole import PinholeCamera, CameraSet
+        import numpy as np
+        poses = json_mod.loads(custom_cameras_json)
+        cams = []
+        for p in poses:
+            cam = PinholeCamera.look_at(
+                eye=np.array(p["position"]),
+                target=np.array(p["target"]),
+                up=np.array(p.get("up", [0, 1, 0])),
+                vfov_deg=config.camera_vfov_deg,
+                width=config.render_resolution[0],
+                height=config.render_resolution[1],
+            )
+            cams.append(cam)
+        custom_camera_set = CameraSet(cams)
 
     def update_progress(round_num, stage, pct):
         refine_job.round_number = round_num
@@ -497,12 +525,17 @@ def _run_refinement(source_job: JobInfo, refine_job: RefineJobInfo) -> dict:
         refine_job.last_updated = time.time()
 
     pipeline = RefinePipeline(config)
-    result = pipeline.run(progress_callback=update_progress)
+    result = pipeline.run(
+        progress_callback=update_progress,
+        cameras=custom_camera_set,
+    )
 
-    # Copy final PLY to expected location
+    # Copy final PLY and heatmap to expected locations
+    import shutil
     if result.output_path.exists():
-        import shutil
         shutil.copy2(result.output_path, refine_job.output_ply_path)
+    if result.heatmap_path and result.heatmap_path.exists():
+        shutil.copy2(result.heatmap_path, refine_job.heatmap_ply_path)
 
     return {
         "original_count": result.original_gaussian_count,
@@ -545,6 +578,8 @@ async def get_refine_status(refine_id: str):
         response["metrics"] = rj.metrics
         if rj.output_ply_path and rj.output_ply_path.exists():
             response["ply_url"] = f"/api/refine/download/{refine_id}"
+        if rj.heatmap_ply_path and rj.heatmap_ply_path.exists():
+            response["heatmap_url"] = f"/api/refine/heatmap/{refine_id}"
         if rj.diagnostics_dir and rj.diagnostics_dir.exists():
             response["diagnostics_url"] = f"/api/refine/diagnostics/{refine_id}"
 
@@ -571,6 +606,21 @@ async def download_refined_ply(refine_id: str):
         rj.output_ply_path,
         media_type="application/octet-stream",
         filename=f"refined_{refine_id[:8]}.ply",
+    )
+
+
+@app.get("/api/refine/heatmap/{refine_id}")
+async def download_heatmap_ply(refine_id: str):
+    """Download provenance heatmap PLY file."""
+    if refine_id not in refine_jobs:
+        raise HTTPException(404, "Refinement job not found")
+    rj = refine_jobs[refine_id]
+    if not rj.heatmap_ply_path or not rj.heatmap_ply_path.exists():
+        raise HTTPException(404, "Heatmap PLY not found")
+    return FileResponse(
+        rj.heatmap_ply_path,
+        media_type="application/octet-stream",
+        filename=f"heatmap_{refine_id[:8]}.ply",
     )
 
 

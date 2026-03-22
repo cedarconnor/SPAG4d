@@ -15,7 +15,7 @@ from .session import RefineSession
 from .gaussian.cloud import GaussianCloud
 from .gaussian.provenance import GaussianSource
 from .camera.pinhole import CameraSet, PinholeCamera
-from .camera.trajectory import generate_orbit_trajectory
+from .camera.trajectory import generate_orbit_trajectory, generate_preset_trajectory
 from .camera.panoramic_extractor import extract_panoramic_view
 from .validation.psnr_validator import validate_original_view, check_psnr_regression
 
@@ -83,7 +83,8 @@ class RefinePipeline:
         # === Stage 1: Camera trajectory ===
         logger.info("Stage 1: Camera trajectory")
         if cameras is None:
-            cameras = generate_orbit_trajectory(
+            cameras = generate_preset_trajectory(
+                preset=self.config.camera_preset,
                 center=np.zeros(3),
                 radius=self.config.orbit_radius,
                 n_cameras=self.config.n_cameras,
@@ -226,6 +227,7 @@ class RefinePipeline:
                         synthesized, warp_result.warped_depth,
                         warp_result.valid_mask, gap_mask,
                         device=self.config.device,
+                        confidence_decay_pixels=self.config.confidence_decay_pixels,
                     )
 
                     from .seeding.seeder import seed_shadow_gaussians
@@ -295,9 +297,12 @@ class RefinePipeline:
                 original_psnr=psnr_after,
             )
 
-        # Save final
+        # Save final + heatmap
         final_path = output_dir / "refined_final.ply"
         cloud.to_ply(final_path)
+        heatmap_path = output_dir / "refined_heatmap.ply"
+        cloud.to_heatmap_ply(heatmap_path)
+        logger.info(f"Saved heatmap PLY: {heatmap_path}")
 
         # Compute provenance breakdown
         from .validation.metrics import compute_provenance_breakdown
@@ -316,4 +321,5 @@ class RefinePipeline:
             round_stats=self.session.round_stats,
             total_elapsed_seconds=self.session.total_elapsed,
             synthesis_backend_used=self.config.synthesis_backend,
+            heatmap_path=heatmap_path,
         )

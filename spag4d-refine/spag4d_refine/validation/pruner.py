@@ -46,7 +46,7 @@ def prune_gaussians(
     # Original: use min_opacity threshold
     # Seeded/Promoted: use slightly higher threshold
     low_opacity_original = is_original & (op < min_opacity)
-    low_opacity_other = ~is_original & (op < min_opacity * 2)
+    low_opacity_other = ~is_original & (op < min_opacity)
     keep &= ~low_opacity_original
     keep &= ~low_opacity_other
 

@@ -157,6 +157,10 @@ class CameraSet:
     def append(self, camera: PinholeCamera) -> None:
         self.cameras.append(camera)
 
+    def merge(self, other: CameraSet) -> CameraSet:
+        """Merge two camera sets."""
+        return CameraSet(self.cameras + other.cameras)
+
     def save_json(self, path: str | Path) -> None:
         """Save camera set to JSON file."""
         data = {

@@ -75,6 +75,55 @@ def generate_orbit_trajectory(
     return CameraSet(cameras)
 
 
+def generate_preset_trajectory(
+    preset: str = "orbit",
+    center: np.ndarray = np.zeros(3),
+    radius: float = 1.0,
+    n_cameras: int = 8,
+    vfov_deg: float = 60.0,
+    resolution: tuple[int, int] = (1920, 1080),
+) -> CameraSet:
+    """
+    Generate cameras using a named preset strategy.
+
+    Presets:
+        orbit: Horizontal ring at elevation 0.
+        orbit_above: Half horizontal + half at +30 deg elevation.
+        orbit_below: Half horizontal + half at -20 deg elevation.
+        full_sphere: Third at 0, third at +30, third at -20.
+    """
+    kwargs = dict(center=center, radius=radius, vfov_deg=vfov_deg, resolution=resolution)
+
+    if preset == "orbit":
+        return generate_orbit_trajectory(n_cameras=n_cameras, elevation_deg=0, **kwargs)
+
+    elif preset == "orbit_above":
+        n_low = n_cameras // 2
+        n_high = n_cameras - n_low
+        low = generate_orbit_trajectory(n_cameras=n_low, elevation_deg=0, **kwargs)
+        high = generate_orbit_trajectory(n_cameras=n_high, elevation_deg=30, **kwargs)
+        return low.merge(high)
+
+    elif preset == "orbit_below":
+        n_mid = n_cameras // 2
+        n_low = n_cameras - n_mid
+        mid = generate_orbit_trajectory(n_cameras=n_mid, elevation_deg=0, **kwargs)
+        low = generate_orbit_trajectory(n_cameras=n_low, elevation_deg=-20, **kwargs)
+        return mid.merge(low)
+
+    elif preset == "full_sphere":
+        n_mid = n_cameras // 3
+        n_high = n_cameras // 3
+        n_low = n_cameras - n_mid - n_high
+        mid = generate_orbit_trajectory(n_cameras=n_mid, elevation_deg=0, **kwargs)
+        high = generate_orbit_trajectory(n_cameras=n_high, elevation_deg=30, **kwargs)
+        low = generate_orbit_trajectory(n_cameras=n_low, elevation_deg=-20, **kwargs)
+        return mid.merge(high).merge(low)
+
+    else:
+        return generate_orbit_trajectory(n_cameras=n_cameras, elevation_deg=0, **kwargs)
+
+
 def generate_path_trajectory(
     keyframes: List[np.ndarray],
     n_cameras: int = 30,
