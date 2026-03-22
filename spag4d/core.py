@@ -2,9 +2,7 @@
 """
 Main SPAG4D class that orchestrates the conversion pipeline.
 
-Two modes:
-  - SPAG (default): DAP/DA360 depth -> direct spherical Gaussian conversion
-  - SHARP refined:  DAP/DA360 depth -> per-face SHARP inference -> merged Gaussians
+DAP/DA360 depth estimation -> SPAG spherical Gaussian conversion -> PLY export
 """
 
 import torch
@@ -30,13 +28,7 @@ class ConversionResult:
 
 
 class SPAG4D:
-    """
-    SPAG-4D: 360° Panorama to Gaussian Splat converter.
-
-    Supports two pipelines:
-      - SPAG (default): Fast depth-to-Gaussian conversion via spherical projection
-      - SHARP refined: Per-face SHARP inference for higher quality output
-    """
+    """SPAG-4D: 360° Panorama to Gaussian Splat converter."""
 
     def __init__(
         self,
@@ -44,9 +36,6 @@ class SPAG4D:
         depth_model: str = "da360",
         model_path: Optional[str] = None,
         use_mock_dap: bool = False,
-        sharp_refine: bool = False,
-        sharp_cubemap_size: int = 1536,
-        sharp_projection_mode: str = "icosahedral",
     ):
         self.device = torch.device(
             device if device != "cuda" or torch.cuda.is_available() else "cpu"
@@ -58,11 +47,6 @@ class SPAG4D:
 
         # Eagerly load the default depth model
         self._get_depth_model(depth_model)
-
-        self.sharp_refine = sharp_refine
-        self.sharp_cubemap_size = sharp_cubemap_size
-        self.sharp_projection_mode = sharp_projection_mode
-        self._sharp_pipeline = None
 
     def _get_depth_model(self, name: str):
         """Get or lazy-load a depth model by name."""
@@ -96,9 +80,6 @@ class SPAG4D:
         global_scale: float = 1.0,
         force_erp: bool = False,
         depth_model: Optional[str] = None,
-        sharp_refine: Optional[bool] = None,
-        sharp_projection: Optional[str] = None,
-        sharp_cubemap_size: Optional[int] = None,
         grid_jitter: float = 0.0,
         depth_preview_path: Optional[Union[str, Path]] = None,
         depth_npy_path: Optional[Union[str, Path]] = None,
@@ -163,25 +144,13 @@ class SPAG4D:
         if depth_npy_path:
             np.save(str(depth_npy_path), depth.cpu().numpy())
 
-        # Decide pipeline
-        use_sharp = sharp_refine if sharp_refine is not None else self.sharp_refine
-
-        if use_sharp:
-            gaussians = self._run_sharp_pipeline(
-                image_tensor, depth,
-                depth_min=depth_min, depth_max=depth_max,
-                sky_threshold=sky_threshold, grid_jitter=grid_jitter,
-                sharp_projection=sharp_projection,
-                sharp_cubemap_size=sharp_cubemap_size,
-            )
-            colors_linear = True
-        else:
-            gaussians = self._run_spag_pipeline(
-                image_tensor, depth,
-                depth_min=depth_min, depth_max=depth_max,
-                sky_threshold=sky_threshold, stride=stride,
-            )
-            colors_linear = False
+        # Run SPAG pipeline
+        gaussians = self._run_spag_pipeline(
+            image_tensor, depth,
+            depth_min=depth_min, depth_max=depth_max,
+            sky_threshold=sky_threshold, stride=stride,
+        )
+        colors_linear = False
 
         # Post-generation filters
         if outlier_pruning > 0.0 and gaussians['means'].shape[0] > 0:
@@ -275,49 +244,6 @@ class SPAG4D:
 
         n = gaussians['means'].shape[0]
         print(f"[SPAG4D] SPAG generated {n:,} Gaussians in {time.time() - t:.1f}s")
-        return gaussians
-
-    def _run_sharp_pipeline(
-        self,
-        image_tensor: torch.Tensor,
-        depth: torch.Tensor,
-        depth_min: float,
-        depth_max: float,
-        sky_threshold: float,
-        grid_jitter: float,
-        sharp_projection: Optional[str],
-        sharp_cubemap_size: Optional[int],
-    ) -> dict:
-        """SHARP refinement path: per-face SHARP inference."""
-        from .sharp_gaussian_pipeline import SHARPGaussianPipeline
-
-        cubemap_sz = sharp_cubemap_size or self.sharp_cubemap_size
-        proj_mode = sharp_projection or self.sharp_projection_mode
-
-        # Lazy init / rebuild if settings changed
-        if (self._sharp_pipeline is not None and
-            (self._sharp_pipeline.projection_mode != proj_mode or
-             self._sharp_pipeline.cubemap_size != cubemap_sz)):
-            self._sharp_pipeline = None
-
-        if self._sharp_pipeline is None:
-            self._sharp_pipeline = SHARPGaussianPipeline(
-                device=self.device,
-                cubemap_size=cubemap_sz,
-                projection_mode=proj_mode,
-            )
-            self._sharp_pipeline.load_model()
-
-        erp_float = image_tensor.float() / 255.0 if image_tensor.dtype == torch.uint8 else image_tensor.float()
-        gaussians = self._sharp_pipeline.generate(
-            erp_image=erp_float,
-            dap_depth=depth,
-            depth_min=depth_min,
-            depth_max=depth_max,
-            sky_threshold=sky_threshold,
-            grid_jitter=grid_jitter,
-        )
-
         return gaussians
 
     @staticmethod

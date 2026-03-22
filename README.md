@@ -171,8 +171,6 @@ This lets you verify that refinement is adding splats in the right places.
 
 Both models download weights automatically on first use (~1.3-1.5 GB each).
 
-> **Note on SHARP refinement:** An experimental `--sharp-refine` flag exists that runs Apple's [ML-SHARP](https://github.com/apple/ml-sharp) per-face neural inference. In practice, SHARP refinement produces lower quality than the default SPAG mode for panoramic scenes -- it generates fewer splats, introduces face-boundary artifacts, and takes 20x longer. It is retained for research/testing only.
-
 ---
 
 ## Manual Setup (Linux / Mac / Developer)
@@ -251,4 +249,4 @@ static/
 
 ## License
 
-MIT (application code). SHARP model weights are under [Apple's license](https://github.com/apple/ml-sharp/blob/main/LICENSE).
+MIT

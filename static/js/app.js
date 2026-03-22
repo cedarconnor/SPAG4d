@@ -31,15 +31,14 @@ class SPAG4DApp {
 
         // Parameters
         this.depthModelInput = document.getElementById('depth-model');
-        this.sharpRefineInput = document.getElementById('sharp-refine');
+        // SHARP removed — kept for backward compat
+
         this.strideInput = document.getElementById('stride');
         this.depthMinInput = document.getElementById('depth-min');
         this.depthMaxInput = document.getElementById('depth-max');
         this.skyThresholdInput = document.getElementById('sky-threshold');
         this.outlierPruningInput = document.getElementById('outlier-pruning');
         this.globalScaleInput = document.getElementById('global-scale');
-        this.sharpProjectionInput = document.getElementById('sharp-projection');
-        this.sharpCubemapSizeInput = document.getElementById('sharp-cubemap-size');
 
         // Input preview
         this.inputPreview = document.getElementById('input-preview');
@@ -51,8 +50,6 @@ class SPAG4DApp {
         this.downloadPlyBtn.addEventListener('click', () => this.downloadFile());
 
         // SHARP refine toggle: show/hide SHARP-only params
-        if (this.sharpRefineInput) {
-            this.sharpRefineInput.addEventListener('change', () => this.toggleSharpParams());
         }
 
         // Reset View Button
@@ -157,7 +154,8 @@ class SPAG4DApp {
     }
 
     toggleSharpParams() {
-        const show = this.sharpRefineInput.checked;
+        // SHARP removed
+        const show = false;
         document.querySelectorAll('.sharp-only').forEach(el => {
             el.style.display = show ? '' : 'none';
         });
@@ -251,7 +249,6 @@ class SPAG4DApp {
 
         const params = new URLSearchParams({
             depth_model: this.depthModelInput.value,
-            sharp_refine: this.sharpRefineInput.checked,
             stride: this.strideInput.value,
             depth_min: this.depthMinInput.value,
             depth_max: this.depthMaxInput.value,
@@ -260,8 +257,6 @@ class SPAG4DApp {
             grazing_angle: document.getElementById('grazing-angle')?.value || '90',
             sparse_pruning: document.getElementById('sparse-pruning')?.value || '0',
             global_scale: this.globalScaleInput.value,
-            sharp_projection: this.sharpProjectionInput.value,
-            sharp_cubemap_size: this.sharpCubemapSizeInput.value,
         });
 
         try {

@@ -80,20 +80,6 @@ echo [2/7] Installing SPAG-4D dependencies...
 !PIP! install -e ".[server,download]"
 
 echo.
-echo [3/7] Installing ML-SHARP (Apple)...
-if not exist "ml-sharp\pyproject.toml" (
-    echo    Cloning ML-SHARP...
-    git clone https://github.com/apple/ml-sharp ml-sharp
-)
-if exist "ml-sharp\pyproject.toml" (
-    !PIP! install --no-deps -e ml-sharp
-    echo    [OK] ML-SHARP installed.
-) else (
-    echo    [WARN] ML-SHARP clone failed. SHARP refinement will not be available.
-    echo          You can still use SPAG mode (the default).
-)
-
-echo.
 echo [4/7] Installing DAP depth model...
 if not exist "spag4d\dap_arch\DAP\networks" (
     echo    Initializing DAP submodule...
@@ -182,7 +168,6 @@ echo   Run 'run.bat' to start SPAG-4D.
 echo   Opens http://localhost:7860 in your browser.
 echo.
 echo   Depth models: DAP + DA360
-echo   Pipeline modes: SPAG (fast) + SHARP (optional)
 echo   Refinement: Klein 9B synthesis (weights download on first use)
 echo ==================================================
 echo.

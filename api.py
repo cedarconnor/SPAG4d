@@ -184,7 +184,6 @@ async def add_coop_coep(request: Request, call_next):
 async def convert_panorama(
     file: UploadFile = File(...),
     depth_model: str = Query("da360", pattern="^(dap|da360)$"),
-    sharp_refine: bool = Query(False),
     stride: int = Query(2, ge=1, le=8),
     depth_min: float = Query(0.1, ge=0.01),
     depth_max: float = Query(100.0, le=1000.0),
@@ -193,12 +192,8 @@ async def convert_panorama(
     grazing_angle: float = Query(90.0, ge=30.0, le=90.0),
     sparse_pruning: float = Query(0.0, ge=0.0, le=1.0),
     global_scale: float = Query(1.0, ge=0.1, le=10.0),
-    sharp_projection: str = Query("icosahedral"),
-    sharp_cubemap_size: int = Query(1536, ge=256, le=4096),
 ):
     """Convert uploaded panorama to Gaussian splat PLY."""
-    if sharp_projection not in ("cubemap", "icosahedral"):
-        raise HTTPException(400, f"Invalid sharp_projection: {sharp_projection!r}. Must be 'cubemap' or 'icosahedral'.")
     if depth_min >= depth_max:
         raise HTTPException(400, f"depth_min ({depth_min}) must be less than depth_max ({depth_max}).")
 
@@ -221,7 +216,6 @@ async def convert_panorama(
 
     job.params = {
         "depth_model": depth_model,
-        "sharp_refine": sharp_refine,
         "stride": stride,
         "depth_min": depth_min,
         "depth_max": depth_max,
@@ -230,8 +224,6 @@ async def convert_panorama(
         "grazing_angle": grazing_angle,
         "sparse_pruning": sparse_pruning,
         "global_scale": global_scale,
-        "sharp_projection": sharp_projection,
-        "sharp_cubemap_size": sharp_cubemap_size,
     }
 
     suffix = Path(file.filename).suffix if file.filename else '.jpg'
@@ -246,7 +238,6 @@ async def convert_panorama(
     asyncio.create_task(process_job(
         job,
         depth_model=depth_model,
-        sharp_refine=sharp_refine,
         stride=stride,
         depth_min=depth_min,
         depth_max=depth_max,
@@ -255,8 +246,6 @@ async def convert_panorama(
         grazing_angle=grazing_angle,
         sparse_pruning=sparse_pruning,
         global_scale=global_scale,
-        sharp_projection=sharp_projection,
-        sharp_cubemap_size=sharp_cubemap_size,
     ))
 
     return JSONResponse({
@@ -269,7 +258,6 @@ async def convert_panorama(
 async def process_job(
     job: JobInfo,
     depth_model: str = "dap",
-    sharp_refine: bool = False,
     stride: int = 2,
     depth_min: float = 0.1,
     depth_max: float = 100.0,
@@ -278,8 +266,6 @@ async def process_job(
     grazing_angle: float = 90.0,
     sparse_pruning: float = 0.0,
     global_scale: float = 1.0,
-    sharp_projection: str = "icosahedral",
-    sharp_cubemap_size: int = 1536,
 ):
     """Process conversion job with GPU semaphore."""
     try:
@@ -301,9 +287,6 @@ async def process_job(
                 sparse_pruning=sparse_pruning,
                 global_scale=global_scale,
                 depth_model=depth_model,
-                sharp_refine=sharp_refine,
-                sharp_projection=sharp_projection,
-                sharp_cubemap_size=sharp_cubemap_size,
                 depth_preview_path=str(job.depth_preview_path),
                 depth_npy_path=str(job.depth_npy_path),
             )
