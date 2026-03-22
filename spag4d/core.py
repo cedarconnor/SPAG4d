@@ -91,6 +91,8 @@ class SPAG4D:
         sky_threshold: float = 80.0,
         stride: int = 2,
         outlier_pruning: float = 0.0,
+        grazing_angle: float = 90.0,
+        sparse_pruning: float = 0.0,
         global_scale: float = 1.0,
         force_erp: bool = False,
         depth_model: Optional[str] = None,
@@ -181,7 +183,7 @@ class SPAG4D:
             )
             colors_linear = False
 
-        # Outlier pruning
+        # Post-generation filters
         if outlier_pruning > 0.0 and gaussians['means'].shape[0] > 0:
             try:
                 from .scene_filter import prune_outliers
@@ -189,6 +191,29 @@ class SPAG4D:
             except Exception as e:
                 import warnings
                 warnings.warn(f"Outlier pruning failed: {e}")
+
+        if grazing_angle < 90.0 and gaussians['means'].shape[0] > 0:
+            try:
+                from .scene_filter import prune_grazing_angle
+                depth_np = depth.detach().cpu().numpy() if hasattr(depth, 'detach') else depth
+                gaussians = prune_grazing_angle(
+                    gaussians, depth_np, stride=stride, max_angle_deg=grazing_angle,
+                )
+            except Exception as e:
+                import warnings
+                warnings.warn(f"Grazing angle filter failed: {e}")
+
+        if sparse_pruning > 0.0 and gaussians['means'].shape[0] > 0:
+            try:
+                from .scene_filter import prune_sparse_regions
+                # Map strength 0-1 to min_neighbors 1-6
+                min_n = max(1, int(1 + sparse_pruning * 5))
+                gaussians = prune_sparse_regions(
+                    gaussians, min_neighbors=min_n, radius_multiplier=3.0,
+                )
+            except Exception as e:
+                import warnings
+                warnings.warn(f"Sparse region pruning failed: {e}")
 
         # Save PLY
         output_path = str(output_path)

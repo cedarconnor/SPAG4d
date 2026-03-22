@@ -257,6 +257,8 @@ class SPAG4DApp {
             depth_max: this.depthMaxInput.value,
             sky_threshold: this.skyThresholdInput.value,
             outlier_pruning: this.outlierPruningInput.value,
+            grazing_angle: document.getElementById('grazing-angle')?.value || '90',
+            sparse_pruning: document.getElementById('sparse-pruning')?.value || '0',
             global_scale: this.globalScaleInput.value,
             sharp_projection: this.sharpProjectionInput.value,
             sharp_cubemap_size: this.sharpCubemapSizeInput.value,

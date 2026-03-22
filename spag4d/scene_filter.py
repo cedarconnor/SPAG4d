@@ -365,6 +365,163 @@ def apply_sky_mode_to_gaussians(
 
     return combined
 
+def prune_grazing_angle(
+    gaussians: dict,
+    depth_map: np.ndarray,
+    stride: int = 2,
+    max_angle_deg: float = 80.0,
+) -> dict:
+    """
+    Remove Gaussians at extreme grazing angles where the depth surface
+    is nearly edge-on to the camera ray. These create the "striation"
+    artifacts behind rocks and objects where depth wraps around edges.
+
+    Works by computing the local depth gradient — steep depth changes
+    between adjacent pixels indicate a surface nearly parallel to the
+    viewing ray. These splats fan out into elongated strips.
+
+    Args:
+        gaussians: Dict of Gaussian tensors (means, scales, etc.)
+        depth_map: (H, W) original depth map (numpy float32)
+        stride: Pixel stride used during conversion
+        max_angle_deg: Maximum grazing angle in degrees (default 80).
+            Lower = more aggressive pruning of edge splats.
+            90 = no filtering, 60 = aggressive.
+
+    Returns:
+        Filtered gaussians dict
+    """
+    import torch
+    if max_angle_deg >= 90.0 or gaussians['means'].shape[0] == 0:
+        return gaussians
+
+    H, W = depth_map.shape
+
+    # Compute depth gradient magnitude (Sobel-like)
+    # Gradient in theta (horizontal) and phi (vertical) directions
+    pad_depth = np.pad(depth_map, 1, mode='wrap')  # wrap horizontally for 360°
+    grad_y = (pad_depth[2:, 1:-1] - pad_depth[:-2, 1:-1]) / 2.0
+    grad_x = (pad_depth[1:-1, 2:] - pad_depth[1:-1, :-2]) / 2.0
+    grad_mag = np.sqrt(grad_x**2 + grad_y**2)
+
+    # Relative gradient: gradient / depth (dimensionless)
+    safe_depth = np.maximum(depth_map, 0.01)
+    relative_grad = grad_mag / safe_depth
+
+    # Convert max_angle to relative gradient threshold
+    # tan(angle) ≈ depth_gradient / (depth * angular_spacing)
+    # For a surface at angle θ from normal: relative_grad ≈ tan(θ) * angular_spacing
+    angular_spacing = np.pi / H * stride
+    max_relative_grad = np.tan(np.radians(max_angle_deg)) * angular_spacing
+
+    # Sample gradient at Gaussian positions
+    means = gaussians['means'].detach().cpu().numpy()
+    N = means.shape[0]
+
+    # Back-project positions to pixel coordinates
+    # positions = depth * rhat, rhat = [sin(phi)cos(theta), cos(phi), -sin(phi)sin(theta)]
+    r = np.linalg.norm(means, axis=1)
+    y = means[:, 1]
+    phi = np.arccos(np.clip(y / np.maximum(r, 1e-8), -1, 1))  # [0, pi]
+    theta = np.arctan2(-means[:, 2], means[:, 0])  # [-pi, pi]
+    theta = theta % (2 * np.pi)  # [0, 2pi]
+
+    # Map to pixel coordinates
+    px_row = np.clip((phi / np.pi * H).astype(int), 0, H - 1)
+    px_col = np.clip((theta / (2 * np.pi) * W).astype(int), 0, W - 1)
+
+    # Sample relative gradient at each Gaussian's pixel
+    sampled_grad = relative_grad[px_row, px_col]
+
+    keep_mask_np = sampled_grad < max_relative_grad
+    keep_mask = torch.from_numpy(keep_mask_np).to(gaussians['means'].device)
+
+    pruned = {}
+    for key, tensor in gaussians.items():
+        pruned[key] = tensor[keep_mask]
+
+    removed = N - int(keep_mask_np.sum())
+    if removed > 0:
+        print(f"[Grazing Angle] Removed {removed:,} edge splats (max_angle={max_angle_deg}°)")
+
+    return pruned
+
+
+def prune_sparse_regions(
+    gaussians: dict,
+    min_neighbors: int = 3,
+    radius_multiplier: float = 3.0,
+    k: int = 8,
+) -> dict:
+    """
+    Remove Gaussians in low-density regions where local spacing far
+    exceeds the expected density. Unlike SOR (which uses global statistics),
+    this compares each splat's neighbor distance against its own scale,
+    removing splats that are isolated relative to their expected size.
+
+    Targets the "finger" artifacts where splats spread apart behind objects
+    with increasing spacing, while preserving legitimately sparse regions
+    like distant backgrounds.
+
+    Args:
+        gaussians: Dict of Gaussian tensors
+        min_neighbors: Minimum neighbors within the adaptive radius.
+            Splats with fewer neighbors are removed. (default 3)
+        radius_multiplier: Search radius = splat_scale * this multiplier.
+            Higher = more lenient. (default 3.0)
+        k: Number of nearest neighbors to check. (default 8)
+
+    Returns:
+        Filtered gaussians dict
+    """
+    import torch
+
+    N = gaussians['means'].shape[0]
+    if N < k + 1:
+        return gaussians
+
+    try:
+        from scipy.spatial import cKDTree
+    except ImportError:
+        import warnings
+        warnings.warn("scipy not installed. Skipping sparse region pruning.")
+        return gaussians
+
+    means_np = gaussians['means'].detach().cpu().numpy()
+    scales_np = gaussians['scales'].detach().cpu().numpy()
+
+    # Use the max scale dimension as the expected splat radius
+    splat_radius = np.max(scales_np, axis=1)  # [N]
+
+    tree = cKDTree(means_np)
+
+    # For each splat, count how many neighbors are within radius_multiplier * scale
+    search_radius = splat_radius * radius_multiplier
+    # Clamp to reasonable range to avoid degenerate queries
+    search_radius = np.clip(search_radius, 0.001, 100.0)
+
+    # Query k nearest neighbors
+    distances, _ = tree.query(means_np, k=k + 1, workers=-1)
+    neighbor_dists = distances[:, 1:]  # exclude self
+
+    # Count neighbors within the adaptive radius
+    within_radius = neighbor_dists < search_radius[:, np.newaxis]
+    neighbor_count = np.sum(within_radius, axis=1)
+
+    keep_mask_np = neighbor_count >= min_neighbors
+    keep_mask = torch.from_numpy(keep_mask_np).to(gaussians['means'].device)
+
+    pruned = {}
+    for key, tensor in gaussians.items():
+        pruned[key] = tensor[keep_mask]
+
+    removed = N - int(keep_mask_np.sum())
+    if removed > 0:
+        print(f"[Sparse Regions] Removed {removed:,} isolated splats (min_neighbors={min_neighbors})")
+
+    return pruned
+
+
 def prune_outliers(
     gaussians: dict,
     strength: float = 0.5,
