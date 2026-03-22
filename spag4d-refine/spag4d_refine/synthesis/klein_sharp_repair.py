@@ -194,17 +194,8 @@ class KleinSharpRepairer:
         # Convert key names
         converted_sd = _convert_bfl_lora_to_diffusers(raw_sd)
 
-        # Try loading with diffusers native method first
-        try:
-            self._pipeline.load_lora_weights(
-                converted_sd,
-                adapter_name="mlsharp",
-            )
-            return
-        except Exception as e:
-            logger.info(f"Native LoRA load failed ({e}), trying manual injection")
-
-        # Manual injection fallback: apply LoRA weights directly to model
+        # Use manual injection directly — native load_lora_weights with
+        # fused QKV keys causes silent corruption and CUDA segfaults
         self._inject_lora_manual(converted_sd)
 
     def _inject_lora_manual(self, lora_sd: Dict):
