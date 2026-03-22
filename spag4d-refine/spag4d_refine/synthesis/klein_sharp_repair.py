@@ -238,10 +238,12 @@ class KleinSharpRepairer:
             if not hasattr(target, "weight"):
                 continue
 
-            # Apply LoRA: W' = W + B @ A
-            A = matrices["lora_A"].to(target.weight.dtype).to(target.weight.device)
-            B = matrices["lora_B"].to(target.weight.dtype).to(target.weight.device)
-            target.weight.data += B @ A
+            # Apply LoRA: W' = W + B @ A (compute on GPU for speed)
+            compute_device = "cuda" if torch.cuda.is_available() else target.weight.device
+            A = matrices["lora_A"].to(target.weight.dtype).to(compute_device)
+            B = matrices["lora_B"].to(target.weight.dtype).to(compute_device)
+            delta = (B @ A).to(target.weight.device)
+            target.weight.data += delta
             injected += 1
 
         logger.info(f"Manually injected LoRA into {injected} modules")
