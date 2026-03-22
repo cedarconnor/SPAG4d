@@ -219,6 +219,60 @@
                 </div>
             </div>
 
+            <!-- Refinement Controls -->
+            <div id="refine-panel" class="controls-panel" style="display: none;">
+                <div class="actions-row">
+                    <span class="section-label">Splat Refinement</span>
+                    <button id="refine-btn" class="action-btn" disabled>
+                        <span class="btn-icon">🔧</span>
+                        Refine
+                    </button>
+                    <button id="download-refined-btn" class="action-btn" disabled>
+                        <span class="btn-icon">💾</span>
+                        Refined PLY
+                    </button>
+                </div>
+                <div class="params-row">
+                    <div class="param-group" title="Orbit radius around panorama center (meters)">
+                        <label for="orbit-radius">Orbit Radius (m)</label>
+                        <input type="number" id="orbit-radius" value="0.5" min="0.05" max="5" step="0.05">
+                    </div>
+                    <div class="param-group" title="Number of viewpoints around the orbit">
+                        <label for="n-cameras">Cameras</label>
+                        <select id="n-cameras" style="width: 60px;">
+                            <option value="4">4</option>
+                            <option value="8" selected>8</option>
+                            <option value="12">12</option>
+                            <option value="16">16</option>
+                        </select>
+                    </div>
+                    <div class="param-group" title="Maximum refinement rounds (each round refines further)">
+                        <label for="max-rounds">Rounds</label>
+                        <select id="max-rounds" style="width: 60px;">
+                            <option value="1">1</option>
+                            <option value="2" selected>2</option>
+                            <option value="3">3</option>
+                        </select>
+                    </div>
+                    <div class="param-group" title="AI synthesis backend for gap filling">
+                        <label for="synth-backend">Synthesis</label>
+                        <select id="synth-backend" style="width: 120px;">
+                            <option value="klein-sharp" selected>Klein + LoRA</option>
+                            <option value="flux-fill">FLUX Fill</option>
+                        </select>
+                    </div>
+                </div>
+                <!-- Refinement progress -->
+                <div id="refine-status" class="refine-status" style="display: none;">
+                    <div class="refine-progress-bar">
+                        <div id="refine-progress-fill" class="progress-fill" style="width: 0%"></div>
+                    </div>
+                    <span id="refine-status-text">Idle</span>
+                </div>
+                <!-- Metrics display (after completion) -->
+                <div id="refine-metrics" class="refine-metrics" style="display: none;"></div>
+            </div>
+
             <!-- Status Bar -->
             <div class="status-bar">
                 <div class="status-left">

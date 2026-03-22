@@ -147,3 +147,16 @@ static/js/three.min.js
 
 # Removed v1 submodule
 src/
+
+# Large binary test data
+TestImage/*.npy
+TestImage/cobblestone_street_night_8k.jpg
+
+# Downloaded models (50GB+)
+models/
+
+# Refinement test outputs
+refine_test_output/
+
+# Refinement implementation spec (internal)
+spag4d-refinement-implementation-v6.md

@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spag4d-refine"
+version = "0.1.0"
+description = "Post-reconstruction refinement for SPAG-4D Gaussian splats"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0",
+    "numpy>=1.24",
+    "plyfile>=1.0",
+    "scipy>=1.10",
+    "click>=8.0",
+    "Pillow>=9.0",
+]
+
+[project.optional-dependencies]
+synthesis = [
+    "diffusers>=0.37.0",
+    "transformers",
+    "accelerate",
+    "peft",
+    "matplotlib",
+]
+viewer = [
+    "viser>=1.0",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+]
+
+[project.scripts]
+spag4d-refine = "spag4d_refine.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["spag4d_refine*"]

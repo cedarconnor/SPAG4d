@@ -25,6 +25,8 @@ class ConversionResult:
     file_size: int
     processing_time: float
     depth_range: tuple
+    depth_npy_path: Optional[str] = None
+    panorama_size: Optional[tuple] = None
 
 
 class SPAG4D:
@@ -97,6 +99,7 @@ class SPAG4D:
         sharp_cubemap_size: Optional[int] = None,
         grid_jitter: float = 0.0,
         depth_preview_path: Optional[Union[str, Path]] = None,
+        depth_npy_path: Optional[Union[str, Path]] = None,
     ) -> ConversionResult:
         """
         Convert equirectangular panorama to Gaussian splat PLY.
@@ -154,6 +157,10 @@ class SPAG4D:
         if depth_preview_path:
             self._save_depth_preview(depth, depth_preview_path)
 
+        # Save raw depth as numpy array for downstream refinement
+        if depth_npy_path:
+            np.save(str(depth_npy_path), depth.cpu().numpy())
+
         # Decide pipeline
         use_sharp = sharp_refine if sharp_refine is not None else self.sharp_refine
 
@@ -207,6 +214,8 @@ class SPAG4D:
             file_size=file_size,
             processing_time=processing_time,
             depth_range=depth_range,
+            depth_npy_path=str(depth_npy_path) if depth_npy_path else None,
+            panorama_size=(W, H),
         )
 
     def _run_spag_pipeline(

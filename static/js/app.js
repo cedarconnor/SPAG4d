@@ -10,6 +10,8 @@ class SPAG4DApp {
         this.viewer = null;
         this.rgbUrl = null;
         this.depthUrl = null;
+        this.currentRefineId = null;
+        this.refinePollInterval = null;
         this.init();
     }
 
@@ -89,6 +91,16 @@ class SPAG4DApp {
         const killBtn = document.getElementById('kill-server-btn');
         if (killBtn) {
             killBtn.addEventListener('click', () => this.killServer());
+        }
+
+        // Refinement controls
+        const refineBtn = document.getElementById('refine-btn');
+        if (refineBtn) {
+            refineBtn.addEventListener('click', () => this.startRefinement());
+        }
+        const downloadRefinedBtn = document.getElementById('download-refined-btn');
+        if (downloadRefinedBtn) {
+            downloadRefinedBtn.addEventListener('click', () => this.downloadRefinedFile());
         }
 
         // Tab switching (RGB / Depth)
@@ -277,6 +289,14 @@ class SPAG4DApp {
                     if (tabDepth) tabDepth.disabled = false;
                 }
 
+                // Show refinement panel if artifacts are available
+                if (status.refineable) {
+                    const refinePanel = document.getElementById('refine-panel');
+                    const refineBtn = document.getElementById('refine-btn');
+                    if (refinePanel) refinePanel.style.display = '';
+                    if (refineBtn) refineBtn.disabled = false;
+                }
+
                 this.convertBtn.disabled = false;
             } else if (status.status === 'error') {
                 clearInterval(this.pollInterval);
@@ -336,6 +356,124 @@ class SPAG4DApp {
     setStatus(text, progress = '') {
         this.statusText.textContent = text;
         this.progressText.textContent = progress;
+    }
+
+    // ── Refinement ──
+
+    async startRefinement() {
+        if (!this.currentJobId) return;
+
+        const refineBtn = document.getElementById('refine-btn');
+        if (refineBtn) refineBtn.disabled = true;
+
+        const params = new URLSearchParams({
+            job_id: this.currentJobId,
+            orbit_radius: document.getElementById('orbit-radius')?.value || '0.5',
+            n_cameras: document.getElementById('n-cameras')?.value || '8',
+            max_rounds: document.getElementById('max-rounds')?.value || '2',
+            synthesis_backend: document.getElementById('synth-backend')?.value || 'klein-sharp',
+        });
+
+        const refineStatus = document.getElementById('refine-status');
+        if (refineStatus) refineStatus.style.display = '';
+        this.setRefineStatus('Starting refinement...', 0);
+
+        try {
+            const response = await fetch(`/api/refine?${params}`, { method: 'POST' });
+            if (!response.ok) {
+                const err = await response.json();
+                throw new Error(err.detail || 'Refinement failed to start');
+            }
+            const result = await response.json();
+            this.currentRefineId = result.refine_job_id;
+            this.startRefinePoll();
+        } catch (error) {
+            this.setRefineStatus(`Error: ${error.message}`, 0);
+            if (refineBtn) refineBtn.disabled = false;
+        }
+    }
+
+    startRefinePoll() {
+        if (this.refinePollInterval) clearInterval(this.refinePollInterval);
+        this.refinePollInterval = setInterval(() => this.checkRefineStatus(), 2000);
+    }
+
+    async checkRefineStatus() {
+        if (!this.currentRefineId) return;
+
+        try {
+            const response = await fetch(`/api/refine/status/${this.currentRefineId}`);
+            if (!response.ok) throw new Error('Status check failed');
+            const status = await response.json();
+
+            if (status.status === 'processing') {
+                const label = status.stage ? `Round ${status.round} - ${status.stage}` : `Round ${status.round}`;
+                this.setRefineStatus(label, status.progress_pct);
+            } else if (status.status === 'complete') {
+                clearInterval(this.refinePollInterval);
+                this.refinePollInterval = null;
+                this.setRefineStatus('Refinement complete!', 100);
+
+                // Load refined PLY into viewer
+                if (status.ply_url) {
+                    this.ensureViewer();
+                    this.viewer.loadScene(status.ply_url);
+                }
+
+                // Show metrics
+                if (status.metrics) this.showRefineMetrics(status.metrics);
+
+                // Enable download
+                const dlBtn = document.getElementById('download-refined-btn');
+                if (dlBtn) dlBtn.disabled = false;
+
+                const refineBtn = document.getElementById('refine-btn');
+                if (refineBtn) refineBtn.disabled = false;
+
+            } else if (status.status === 'error') {
+                clearInterval(this.refinePollInterval);
+                this.refinePollInterval = null;
+                this.setRefineStatus(`Error: ${status.error}`, 0);
+                const refineBtn = document.getElementById('refine-btn');
+                if (refineBtn) refineBtn.disabled = false;
+            }
+        } catch (error) {
+            console.error('Refine poll error:', error);
+        }
+    }
+
+    setRefineStatus(text, pct) {
+        const statusEl = document.getElementById('refine-status-text');
+        const fillEl = document.getElementById('refine-progress-fill');
+        if (statusEl) statusEl.textContent = text;
+        if (fillEl) fillEl.style.width = `${pct}%`;
+    }
+
+    showRefineMetrics(metrics) {
+        const container = document.getElementById('refine-metrics');
+        if (!container) return;
+        container.style.display = '';
+
+        const items = [
+            { label: 'Added', value: metrics.gaussians_added?.toLocaleString() || '0' },
+            { label: 'Pruned', value: metrics.gaussians_pruned?.toLocaleString() || '0' },
+            { label: 'Final Count', value: metrics.final_count?.toLocaleString() || '—' },
+            { label: 'Rounds', value: metrics.rounds_completed || '—' },
+            { label: 'Time', value: metrics.total_time ? `${metrics.total_time}s` : '—' },
+            { label: 'Backend', value: metrics.synthesis_backend || '—' },
+        ];
+
+        container.innerHTML = items.map(m =>
+            `<div class="metric-card"><div class="metric-value">${m.value}</div><div class="metric-label">${m.label}</div></div>`
+        ).join('');
+    }
+
+    downloadRefinedFile() {
+        if (!this.currentRefineId) return;
+        const link = document.createElement('a');
+        link.href = `/api/refine/download/${this.currentRefineId}`;
+        link.download = `refined_${this.currentRefineId.slice(0, 8)}.ply`;
+        link.click();
     }
 }
 

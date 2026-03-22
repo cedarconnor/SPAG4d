@@ -48,9 +48,32 @@ class JobInfo:
         self.input_path: Optional[Path] = None
         self.output_ply_path: Optional[Path] = None
         self.depth_preview_path: Optional[Path] = None
+        self.depth_npy_path: Optional[Path] = None
         self.result: Optional[ConversionResult] = None
         self.error: Optional[str] = None
         self.params: dict = {}
+
+
+class RefineJobInfo:
+    """Tracks a refinement job."""
+
+    def __init__(self, refine_id: str, source_job_id: str):
+        self.refine_id = refine_id
+        self.source_job_id = source_job_id
+        self.status = "queued"  # queued, processing, complete, error
+        self.created_at = time.time()
+        self.last_updated = time.time()
+        self.round_number = 0
+        self.stage = ""
+        self.progress_pct = 0
+        self.output_ply_path: Optional[Path] = None
+        self.diagnostics_dir: Optional[Path] = None
+        self.metrics: dict = {}
+        self.error: Optional[str] = None
+        self.params: dict = {}
+
+
+refine_jobs: dict = {}  # refine_id -> RefineJobInfo
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -111,7 +134,7 @@ async def run_cleanup():
     for job_id in expired_jobs:
         job = jobs.pop(job_id, None)
         if job:
-            for path in [job.input_path, job.output_ply_path, job.depth_preview_path]:
+            for path in [job.input_path, job.output_ply_path, job.depth_preview_path, job.depth_npy_path]:
                 if path and path.exists():
                     try:
                         path.unlink()
@@ -122,7 +145,7 @@ async def run_cleanup():
     active_paths = set()
     for j in jobs.values():
         if j.status in ("queued", "processing"):
-            for p in [j.input_path, j.output_ply_path, j.depth_preview_path]:
+            for p in [j.input_path, j.output_ply_path, j.depth_preview_path, j.depth_npy_path]:
                 if p:
                     active_paths.add(str(p))
 
@@ -210,6 +233,7 @@ async def convert_panorama(
     job.input_path = TEMP_DIR / f"{job_id}_input{suffix}"
     job.output_ply_path = TEMP_DIR / f"{job_id}_output.ply"
     job.depth_preview_path = TEMP_DIR / f"{job_id}_depth.jpg"
+    job.depth_npy_path = TEMP_DIR / f"{job_id}_depth.npy"
 
     with open(job.input_path, "wb") as f:
         f.write(content)
@@ -270,15 +294,14 @@ async def process_job(
                 sharp_projection=sharp_projection,
                 sharp_cubemap_size=sharp_cubemap_size,
                 depth_preview_path=str(job.depth_preview_path),
+                depth_npy_path=str(job.depth_npy_path),
             )
 
             job.result = result
             job.status = "complete"
             job.last_updated = time.time()
 
-            # Delete input file immediately after processing
-            if job.input_path and job.input_path.exists():
-                job.input_path.unlink()
+            # Keep input panorama for potential refinement (cleaned up with job expiry)
 
     except Exception as e:
         import traceback
@@ -315,6 +338,11 @@ async def get_job_status(job_id: str):
         response["ply_url"] = f"/api/download/{job_id}"
         if job.depth_preview_path and job.depth_preview_path.exists():
             response["depth_preview_url"] = f"/api/depth_preview/{job_id}"
+        # Refinement readiness: need PLY, panorama, and depth
+        has_ply = job.output_ply_path and job.output_ply_path.exists()
+        has_pano = job.input_path and job.input_path.exists()
+        has_depth = job.depth_npy_path and job.depth_npy_path.exists()
+        response["refineable"] = bool(has_ply and has_pano and has_depth)
 
     if job.status == "error":
         response["error"] = job.error
@@ -363,6 +391,243 @@ async def download_file(job_id: str):
         media_type="application/octet-stream",
         filename=f"spag4d_{job_id[:8]}.ply"
     )
+
+
+# ─────────────────────────────────────────────────────────────────
+# Refinement Endpoints
+# ─────────────────────────────────────────────────────────────────
+@app.post("/api/refine")
+async def start_refinement(
+    job_id: str = Query(..., description="Source conversion job ID"),
+    orbit_radius: float = Query(0.5, ge=0.05, le=5.0),
+    n_cameras: int = Query(8, ge=2, le=32),
+    max_rounds: int = Query(2, ge=1, le=5),
+    synthesis_backend: str = Query("klein-sharp"),
+):
+    """Start refinement on an existing conversion job."""
+    if job_id not in jobs:
+        raise HTTPException(404, "Source job not found")
+
+    job = jobs[job_id]
+    if job.status != "complete":
+        raise HTTPException(400, "Source job not complete")
+
+    # Verify all artifacts exist
+    if not (job.output_ply_path and job.output_ply_path.exists()):
+        raise HTTPException(400, "PLY file not found")
+    if not (job.input_path and job.input_path.exists()):
+        raise HTTPException(400, "Input panorama not found (may have been cleaned up)")
+    if not (job.depth_npy_path and job.depth_npy_path.exists()):
+        raise HTTPException(400, "Depth map not found")
+
+    refine_id = str(uuid.uuid4())
+    refine_job = RefineJobInfo(refine_id, job_id)
+    refine_job.params = {
+        "orbit_radius": orbit_radius,
+        "n_cameras": n_cameras,
+        "max_rounds": max_rounds,
+        "synthesis_backend": synthesis_backend,
+    }
+    refine_job.output_ply_path = TEMP_DIR / f"{refine_id}_refined.ply"
+    refine_job.diagnostics_dir = TEMP_DIR / f"{refine_id}_diagnostics"
+    refine_jobs[refine_id] = refine_job
+
+    asyncio.create_task(process_refinement(refine_job, job))
+
+    return JSONResponse({
+        "refine_job_id": refine_id,
+        "status": "queued",
+    })
+
+
+async def process_refinement(refine_job: RefineJobInfo, source_job: JobInfo):
+    """Run refinement pipeline in background."""
+    try:
+        async with gpu_semaphore:
+            refine_job.status = "processing"
+            refine_job.last_updated = time.time()
+
+            result = await run_in_threadpool(
+                _run_refinement,
+                source_job=source_job,
+                refine_job=refine_job,
+            )
+
+            refine_job.metrics = result
+            refine_job.status = "complete"
+            refine_job.last_updated = time.time()
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        refine_job.status = "error"
+        refine_job.error = str(e)
+        refine_job.last_updated = time.time()
+
+
+def _run_refinement(source_job: JobInfo, refine_job: RefineJobInfo) -> dict:
+    """Execute the refinement pipeline (blocking, runs in thread)."""
+    import sys
+    _refine_path = str(Path(__file__).resolve().parent / "spag4d-refine")
+    if _refine_path not in sys.path:
+        sys.path.insert(0, _refine_path)
+
+    from spag4d_refine.config import RefineConfig
+    from spag4d_refine.pipeline import RefinePipeline
+
+    params = refine_job.params
+    output_dir = refine_job.diagnostics_dir or TEMP_DIR / f"{refine_job.refine_id}_out"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    config = RefineConfig(
+        splat_path=source_job.output_ply_path,
+        panorama_rgb_path=source_job.input_path,
+        panorama_depth_path=source_job.depth_npy_path,
+        output_dir=output_dir,
+        max_refinement_rounds=params.get("max_rounds", 2),
+        synthesis_backend=params.get("synthesis_backend", "klein-sharp"),
+        orbit_radius=params.get("orbit_radius", 0.5),
+        n_cameras=params.get("n_cameras", 8),
+    )
+
+    def update_progress(round_num, stage, pct):
+        refine_job.round_number = round_num
+        refine_job.stage = stage
+        refine_job.progress_pct = pct
+        refine_job.last_updated = time.time()
+
+    pipeline = RefinePipeline(config)
+    result = pipeline.run(progress_callback=update_progress)
+
+    # Copy final PLY to expected location
+    if result.output_path.exists():
+        import shutil
+        shutil.copy2(result.output_path, refine_job.output_ply_path)
+
+    return {
+        "original_count": result.original_gaussian_count,
+        "final_count": result.final_gaussian_count,
+        "gaussians_added": result.gaussians_added,
+        "gaussians_pruned": result.gaussians_pruned,
+        "rounds_completed": result.rounds_completed,
+        "total_time": round(result.total_elapsed_seconds, 1),
+        "synthesis_backend": result.synthesis_backend_used,
+        "round_stats": [
+            {
+                "round": s.round_number,
+                "seeded": s.gaussians_seeded,
+                "promoted": s.gaussians_promoted,
+                "pruned": s.gaussians_pruned,
+                "psnr": round(s.original_psnr, 2),
+                "time": round(s.elapsed_seconds, 1),
+            }
+            for s in result.round_stats
+        ],
+    }
+
+
+@app.get("/api/refine/status/{refine_id}")
+async def get_refine_status(refine_id: str):
+    """Get refinement job status."""
+    if refine_id not in refine_jobs:
+        raise HTTPException(404, "Refinement job not found")
+
+    rj = refine_jobs[refine_id]
+    response = {
+        "refine_job_id": refine_id,
+        "status": rj.status,
+        "round": rj.round_number,
+        "stage": rj.stage,
+        "progress_pct": rj.progress_pct,
+    }
+
+    if rj.status == "complete":
+        response["metrics"] = rj.metrics
+        if rj.output_ply_path and rj.output_ply_path.exists():
+            response["ply_url"] = f"/api/refine/download/{refine_id}"
+        if rj.diagnostics_dir and rj.diagnostics_dir.exists():
+            response["diagnostics_url"] = f"/api/refine/diagnostics/{refine_id}"
+
+    if rj.status == "error":
+        response["error"] = rj.error
+
+    return JSONResponse(response)
+
+
+@app.get("/api/refine/download/{refine_id}")
+async def download_refined_ply(refine_id: str):
+    """Download refined PLY file."""
+    if refine_id not in refine_jobs:
+        raise HTTPException(404, "Refinement job not found")
+
+    rj = refine_jobs[refine_id]
+    if rj.status != "complete":
+        raise HTTPException(400, "Refinement not complete")
+
+    if not rj.output_ply_path or not rj.output_ply_path.exists():
+        raise HTTPException(404, "Refined PLY not found")
+
+    return FileResponse(
+        rj.output_ply_path,
+        media_type="application/octet-stream",
+        filename=f"refined_{refine_id[:8]}.ply",
+    )
+
+
+@app.get("/api/refine/diagnostics/{refine_id}")
+async def get_refine_diagnostics(refine_id: str):
+    """List diagnostic images for a refinement job."""
+    if refine_id not in refine_jobs:
+        raise HTTPException(404, "Refinement job not found")
+
+    rj = refine_jobs[refine_id]
+    if not rj.diagnostics_dir or not rj.diagnostics_dir.exists():
+        raise HTTPException(404, "No diagnostics available")
+
+    images = sorted(
+        f.name for f in rj.diagnostics_dir.iterdir()
+        if f.suffix.lower() in (".png", ".jpg", ".jpeg")
+    )
+    return JSONResponse({
+        "refine_job_id": refine_id,
+        "images": [
+            {"name": name, "url": f"/api/refine/diagnostics/{refine_id}/{name}"}
+            for name in images
+        ],
+    })
+
+
+@app.get("/api/refine/diagnostics/{refine_id}/{filename}")
+async def get_refine_diagnostic_image(refine_id: str, filename: str):
+    """Serve a single diagnostic image."""
+    if refine_id not in refine_jobs:
+        raise HTTPException(404, "Refinement job not found")
+
+    rj = refine_jobs[refine_id]
+    if not rj.diagnostics_dir:
+        raise HTTPException(404, "No diagnostics available")
+
+    # Sanitize filename to prevent path traversal
+    safe_name = Path(filename).name
+    image_path = rj.diagnostics_dir / safe_name
+    if not image_path.exists() or not image_path.is_file():
+        raise HTTPException(404, "Diagnostic image not found")
+
+    media_type = "image/png" if safe_name.endswith(".png") else "image/jpeg"
+    return FileResponse(image_path, media_type=media_type)
+
+
+@app.get("/api/refine/metrics/{refine_id}")
+async def get_refine_metrics(refine_id: str):
+    """Get refinement metrics."""
+    if refine_id not in refine_jobs:
+        raise HTTPException(404, "Refinement job not found")
+
+    rj = refine_jobs[refine_id]
+    if rj.status != "complete":
+        raise HTTPException(400, "Refinement not complete")
+
+    return JSONResponse(rj.metrics)
 
 
 @app.post("/api/shutdown")
