@@ -96,6 +96,49 @@ print(f"{result.splat_count:,} Gaussians in {result.processing_time:.1f}s")
 
 ---
 
+## Splat Refinement
+
+After conversion, SPAG-4D can refine the Gaussian splat by detecting and filling gaps using AI synthesis. The refinement pipeline:
+
+1. **Renders** the splat from multiple camera viewpoints around the scene
+2. **Detects gaps** by comparing rendered views against the original panorama
+3. **Synthesizes** repaired views using Klein 9B + ml-sharp LoRA
+4. **Seeds** new Gaussians in gap regions from the synthesized depth
+5. **Validates** new Gaussians across multiple views and prunes bad ones
+
+### Camera Modes
+
+| Mode | Description |
+|------|-------------|
+| **Orbit** | Horizontal camera ring at scene center |
+| **Orbit + Above** | Half horizontal + half elevated at 30° |
+| **Orbit + Below** | Half horizontal + half lowered at -20° |
+| **Full Sphere** | Three rings (0°, +30°, -20°) for maximum coverage |
+| **Custom** | Navigate the 3D viewer and click "Add Camera" to place viewpoints manually |
+
+### Provenance Heatmap
+
+After refinement, click the **Heatmap** button to color-code Gaussians by origin:
+
+- **Blue** = Original (from initial conversion)
+- **Green** = Promoted (new, validated across multiple views)
+- **Yellow** = Seeded (new, candidate for promotion)
+
+This lets you verify that refinement is adding splats in the right places.
+
+### Refinement Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Camera Mode | Orbit | Camera placement strategy |
+| Radius | 0.5 | Camera distance from center (meters) |
+| Cameras | 8 | Number of viewpoints (~6 min each with Klein) |
+| Rounds | 1 | Refinement iterations |
+
+> **Note:** Refinement requires `diffusers>=0.37.0` and the Klein 9B model weights (~18 GB). These are installed by `install.bat` and downloaded automatically on first use.
+
+---
+
 ## Settings
 
 | Setting | Default | Description |
@@ -158,7 +201,7 @@ python -m spag4d download-models
 ## Project Structure
 
 ```
-spag4d/
+spag4d/                          # Core conversion pipeline
 ├── core.py                      # Pipeline orchestrator
 ├── spag_converter.py            # Depth-to-Gaussian spherical projection
 ├── dap_model.py                 # DAP depth estimation
@@ -166,17 +209,28 @@ spag4d/
 ├── ply_writer.py                # PLY export (sRGB SH0 encoding)
 ├── scene_filter.py              # Sky detection, pole thinning, outlier pruning
 ├── spherical_grid.py            # 360° coordinate math
-├── cli.py                       # CLI commands
-├── sharp_gaussian_pipeline.py   # SHARP per-face inference (experimental)
-└── projection.py                # Cubemap + icosahedral projectors (SHARP only)
+└── cli.py                       # CLI commands
 
-api.py                           # FastAPI web server
+spag4d-refine/                   # Refinement pipeline (gap filling)
+├── spag4d_refine/
+│   ├── pipeline.py              # Multi-stage refinement orchestrator
+│   ├── config.py                # All refinement parameters
+│   ├── camera/                  # Camera trajectory & panoramic extraction
+│   ├── gaussian/                # GaussianCloud with provenance tracking
+│   ├── regions/                 # Gap region classification
+│   ├── renderer/                # gsplat rendering + diagnostics
+│   ├── seeding/                 # New Gaussian creation from synthesis
+│   ├── synthesis/               # Klein 9B + ml-sharp LoRA inpainting
+│   └── validation/              # PSNR checks, pruning, metrics
+└── tests/
+
+api.py                           # FastAPI web server + refine endpoints
 static/
 ├── index.html
 ├── css/style.css
 └── js/
     ├── viewer.js                # GaussianSplats3D wrapper
-    └── app.js                   # UI logic
+    └── app.js                   # UI logic (conversion + refinement)
 ```
 
 ## Troubleshooting

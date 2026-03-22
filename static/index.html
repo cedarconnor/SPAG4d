@@ -81,36 +81,63 @@
                 <ol>
                     <li><strong>Upload</strong> a 2:1 equirectangular panorama (JPG/PNG)</li>
                     <li><strong>Adjust</strong> parameters below (defaults work well for most scenes)</li>
-                    <li><strong>Convert</strong> — Depth estimation + SPAG conversion (or optional SHARP refinement)</li>
-                    <li><strong>Preview</strong> in the 3D viewer: orbit with mouse, scroll to zoom</li>
-                    <li><strong>Download</strong> as PLY for use in Blender, SuperSplat, or any 3DGS viewer</li>
+                    <li><strong>Convert</strong> — runs depth estimation + SPAG conversion (~1-2s)</li>
+                    <li><strong>Preview</strong> in the 3D viewer: left-click orbit, right-click pan, scroll zoom</li>
+                    <li><strong>Refine</strong> (optional) — AI gap filling with Klein 9B synthesis</li>
+                    <li><strong>Heatmap</strong> — toggle to see which splats are new vs original</li>
+                    <li><strong>Download</strong> as PLY for Blender, SuperSplat, or any 3DGS viewer</li>
                 </ol>
 
-                <h3>Parameters</h3>
+                <h3>Conversion Parameters</h3>
                 <dl class="help-params">
                     <dt>Depth Model</dt>
-                    <dd><strong>DAP</strong> = metric depth, designed for 360°. <strong>DA360</strong>
-                        = scale-invariant disparity with circular padding.</dd>
+                    <dd><strong>DA360</strong> (default) = scale-invariant disparity with 360° padding.
+                        <strong>DAP</strong> = metric depth for panoramas.</dd>
 
                     <dt>SHARP (experimental)</dt>
-                    <dd>Per-face SHARP neural refinement. Experimental — SPAG mode typically produces better results.</dd>
+                    <dd>Per-face neural refinement. Experimental — SPAG mode is faster and usually better.</dd>
 
                     <dt>Stride</dt>
-                    <dd>SPAG pixel stride. 1 = one Gaussian per pixel (max quality), 2 = quarter density (default), 4 = fast preview.</dd>
+                    <dd>Pixel stride for Gaussian generation. 1 = max quality, 2 = balanced (default), 4 = fast preview.</dd>
 
                     <dt>Depth Range</dt>
-                    <dd>Valid depth in meters. Points outside this range are clipped.</dd>
+                    <dd>Valid depth range in meters. Points outside this are clipped.</dd>
 
                     <dt>Sky Cutoff</dt>
-                    <dd>Distance (meters) beyond which points are removed.</dd>
+                    <dd>Max distance in meters. Points beyond this are removed. Use 30m for indoor scenes.</dd>
 
                     <dt>Floaters Cleanup</dt>
-                    <dd>Statistical outlier removal. 0 = off, higher = more aggressive.</dd>
+                    <dd>Outlier removal strength. 0 = off, higher = more aggressive.</dd>
+
+                    <dt>Depth Scale</dt>
+                    <dd>Global depth multiplier. Adjusts overall scene scale.</dd>
+                </dl>
+
+                <h3>Splat Refinement</h3>
+                <p>After conversion, use refinement to fill gaps and improve coverage. Klein 9B synthesizes novel views that seed new Gaussians in hole regions.</p>
+                <dl class="help-params">
+                    <dt>Camera Mode</dt>
+                    <dd><strong>Orbit</strong> = horizontal ring. <strong>Orbit + Above/Below</strong> = adds elevated cameras.
+                        <strong>Full Sphere</strong> = three elevation rings for max coverage.
+                        <strong>Custom</strong> = navigate the viewer, click "Add Camera" to place your own viewpoints.</dd>
+
+                    <dt>Radius</dt>
+                    <dd>Camera distance from center (meters). Larger radius detects more gaps via parallax.</dd>
+
+                    <dt>Cameras</dt>
+                    <dd>Number of viewpoints. More = better coverage, slower (~6 min per camera with Klein).</dd>
+
+                    <dt>Rounds</dt>
+                    <dd>Refinement iterations. 1 round is usually sufficient.</dd>
+
+                    <dt>Heatmap Toggle</dt>
+                    <dd>After refinement, click Heatmap to color-code splats by origin.
+                        <strong>Blue</strong> = original, <strong>Green</strong> = promoted (validated new),
+                        <strong>Yellow</strong> = seeded (candidate).</dd>
                 </dl>
 
                 <div class="tip">
-                    Quick Tips: SPAG mode is fast (~10s). Enable SHARP refine for higher quality (~60s+).
-                    For indoor scenes, reduce Sky Cutoff to 30m.
+                    Quick Tips: Start with Orbit, 4 cameras, 1 round for a quick test. Use Full Sphere for scenes with visible floors/ceilings. After refinement, toggle Heatmap to verify new splats are in the right places.
                 </div>
             </div>
 
@@ -237,7 +264,7 @@
                     </button>
                 </div>
                 <div class="params-row">
-                    <div class="param-group" title="Camera placement strategy for refinement">
+                    <div class="param-group" title="How cameras are placed around the scene. Orbit = horizontal ring, Full Sphere = 3 rings at different heights, Custom = place your own cameras in the 3D viewer">
                         <label for="camera-preset">Camera Mode</label>
                         <select id="camera-preset">
                             <option value="orbit" selected>Orbit</option>
@@ -248,11 +275,11 @@
                         </select>
                     </div>
                     <div id="preset-params" class="param-group-row">
-                        <div class="param-group" title="Orbit radius around panorama center (meters)">
+                        <div class="param-group" title="Distance of cameras from scene center in meters. Larger = more parallax for gap detection">
                             <label for="orbit-radius">Radius (m)</label>
                             <input type="number" id="orbit-radius" value="0.5" min="0.05" max="5" step="0.05">
                         </div>
-                        <div class="param-group" title="Number of viewpoints">
+                        <div class="param-group" title="Number of camera viewpoints. More cameras = better coverage but longer processing (~6 min each)">
                             <label for="n-cameras">Cameras</label>
                             <select id="n-cameras">
                                 <option value="4">4</option>
@@ -267,7 +294,7 @@
                         <span id="custom-camera-count" class="camera-count">0 cameras</span>
                         <button id="clear-cameras-btn" class="sm-btn" title="Remove all custom cameras">Clear</button>
                     </div>
-                    <div class="param-group" title="Maximum refinement rounds">
+                    <div class="param-group" title="Number of refinement iterations. Each round seeds new Gaussians in gaps and prunes bad ones. 1 is usually enough">
                         <label for="max-rounds">Rounds</label>
                         <select id="max-rounds">
                             <option value="1" selected>1</option>

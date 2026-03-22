@@ -119,11 +119,28 @@ if exist "spag4d\da360_arch\DA360\networks" (
 )
 
 echo.
-echo [6/7] Installing gdown (for DA360 weights)...
+echo [6/9] Installing gdown (for DA360 weights)...
 !PIP! install gdown
 
 echo.
-echo [7/7] Downloading model weights...
+echo [7/9] Installing refinement dependencies (diffusers, transformers)...
+!PIP! install "diffusers>=0.37.0" transformers accelerate peft gsplat
+
+echo.
+echo [8/9] Installing Python dev headers for gsplat CUDA compilation...
+"%PYTHON_DIR%\python.exe" -c "import urllib.request,zipfile,io,os; url='https://www.nuget.org/api/v2/package/python/3.11.9'; print('Downloading Python 3.11.9 headers...'); data=urllib.request.urlopen(urllib.request.Request(url,headers={'User-Agent':'SPAG4D'})).read(); z=zipfile.ZipFile(io.BytesIO(data)); inc=r'%PYTHON_DIR%\Include'; lib=r'%PYTHON_DIR%\libs'; os.makedirs(inc,exist_ok=True); os.makedirs(lib,exist_ok=True); [open(os.path.join(inc,n[len('tools/include/'):]),'wb').write(z.read(n)) for n in z.namelist() if n.startswith('tools/include/') and not n.endswith('/')]; [open(os.path.join(lib,n[len('tools/libs/'):]),'wb').write(z.read(n)) for n in z.namelist() if n.startswith('tools/libs/') and not n.endswith('/')]; print('Done: headers + libs installed')"
+if errorlevel 1 (
+    echo    [WARN] Python dev headers download failed. Refinement may not work.
+) else (
+    echo    [OK] Python headers and libs installed for CUDA compilation.
+)
+
+:: Fix gsplat Windows MSVC compatibility
+"%PYTHON_DIR%\python.exe" -c "import os; p=os.path.join(r'%PYTHON_DIR%','Lib','site-packages','gsplat','cuda','_backend.py'); f=open(p).read(); open(p,'w').write(f.replace(\"extra_cflags = [opt_level, '-Wno-attributes']\",\"extra_cflags = [opt_level] if os.name == 'nt' else [opt_level, '-Wno-attributes']\"))" 2>nul
+echo    [OK] gsplat MSVC compatibility patched.
+
+echo.
+echo [9/9] Downloading model weights...
 echo    This may take several minutes on first install.
 echo.
 
@@ -166,6 +183,7 @@ echo   Opens http://localhost:7860 in your browser.
 echo.
 echo   Depth models: DAP + DA360
 echo   Pipeline modes: SPAG (fast) + SHARP (optional)
+echo   Refinement: Klein 9B synthesis (weights download on first use)
 echo ==================================================
 echo.
 pause
