@@ -273,6 +273,7 @@ class RefinePipeline:
                     )
                     # Save intermediate before breaking
                     intermediate_path = output_dir / f"refined_round{self.session.round_number}.ply"
+                    intermediate_path.parent.mkdir(parents=True, exist_ok=True)
                     cloud.to_ply(intermediate_path)
                     self.session.intermediate_ply_paths.append(intermediate_path)
                     self.session.end_round(
@@ -286,6 +287,7 @@ class RefinePipeline:
 
             # Save intermediate
             intermediate_path = output_dir / f"refined_round{self.session.round_number}.ply"
+            intermediate_path.parent.mkdir(parents=True, exist_ok=True)
             cloud.to_ply(intermediate_path)
             self.session.intermediate_ply_paths.append(intermediate_path)
 
@@ -299,6 +301,7 @@ class RefinePipeline:
 
         # Save final + heatmap
         final_path = output_dir / "refined_final.ply"
+        final_path.parent.mkdir(parents=True, exist_ok=True)
         cloud.to_ply(final_path)
         heatmap_path = output_dir / "refined_heatmap.ply"
         cloud.to_heatmap_ply(heatmap_path)
