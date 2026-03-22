@@ -713,13 +713,29 @@ body {
     letter-spacing: 0.05em;
 }
 
+/* ── Refine Panel Layout ─── */
+#refine-panel .actions-row {
+    justify-content: flex-start;
+    width: 100%;
+}
+
+#refine-panel .params-row {
+    width: 100%;
+}
+
+#refine-panel .param-group {
+    flex: 1;
+    min-width: 0;
+}
+
 .refine-status {
     display: flex;
     align-items: center;
     gap: var(--spacing-md);
-    padding: var(--spacing-sm) var(--spacing-md);
+    padding: var(--spacing-sm) 0;
     font-size: 0.75rem;
     color: var(--text-secondary);
+    width: 100%;
 }
 
 .refine-progress-bar {
@@ -740,10 +756,11 @@ body {
 
 .refine-metrics {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    grid-template-columns: repeat(6, 1fr);
     gap: var(--spacing-sm);
-    padding: var(--spacing-sm) var(--spacing-md);
+    padding: var(--spacing-sm) 0;
     font-size: 0.7rem;
+    width: 100%;
 }
 
 .metric-card {
