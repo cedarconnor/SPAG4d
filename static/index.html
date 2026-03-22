@@ -61,6 +61,7 @@
                     <div class="panel-header">
                         <h2>3D Gaussian Splat</h2>
                         <div class="header-controls">
+                            <button id="show-diagnostics-btn" class="sm-btn" disabled title="View per-camera diagnostic images">Diagnostics</button>
                             <button id="reset-view-btn" class="sm-btn" title="Reset View">Reset</button>
                             <button id="upload-splat-btn" class="sm-btn" title="Load .ply file from disk">Load</button>
                             <input type="file" id="upload-splat-input" accept=".ply,.splat,.ksplat,.spz" style="display: none;">
@@ -70,6 +71,16 @@
                         <div class="viewer-placeholder" id="splat-placeholder">
                             <div class="placeholder-icon">✨</div>
                             <p>Convert to see preview</p>
+                        </div>
+                        <!-- Diagnostics Gallery Overlay -->
+                        <div id="diagnostics-gallery" class="diagnostics-gallery" style="display: none;">
+                            <div class="diag-header">
+                                <span>Refinement Diagnostics</span>
+                                <button id="close-diagnostics-btn" class="sm-btn">Close</button>
+                            </div>
+                            <div id="diag-content" class="diag-content">
+                                <p class="diag-empty">No diagnostics yet. Run refinement first.</p>
+                            </div>
                         </div>
                     </div>
                 </div>

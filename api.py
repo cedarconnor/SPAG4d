@@ -574,14 +574,16 @@ async def get_refine_status(refine_id: str):
         "progress_pct": rj.progress_pct,
     }
 
+    # Diagnostics available during processing and after completion
+    if rj.diagnostics_dir and rj.diagnostics_dir.exists():
+        response["diagnostics_url"] = f"/api/refine/diagnostics/{refine_id}"
+
     if rj.status == "complete":
         response["metrics"] = rj.metrics
         if rj.output_ply_path and rj.output_ply_path.exists():
             response["ply_url"] = f"/api/refine/download/{refine_id}"
         if rj.heatmap_ply_path and rj.heatmap_ply_path.exists():
             response["heatmap_url"] = f"/api/refine/heatmap/{refine_id}"
-        if rj.diagnostics_dir and rj.diagnostics_dir.exists():
-            response["diagnostics_url"] = f"/api/refine/diagnostics/{refine_id}"
 
     if rj.status == "error":
         response["error"] = rj.error
@@ -631,15 +633,33 @@ async def get_refine_diagnostics(refine_id: str):
         raise HTTPException(404, "Refinement job not found")
 
     rj = refine_jobs[refine_id]
-    if not rj.diagnostics_dir or not rj.diagnostics_dir.exists():
+    # Diagnostics are saved in output_dir/diagnostics/ subdirectory
+    diag_dir = rj.diagnostics_dir / "diagnostics" if rj.diagnostics_dir else None
+    if not diag_dir or not diag_dir.exists():
+        # Fallback to root diagnostics dir
+        diag_dir = rj.diagnostics_dir
+    if not diag_dir or not diag_dir.exists():
         raise HTTPException(404, "No diagnostics available")
 
     images = sorted(
-        f.name for f in rj.diagnostics_dir.iterdir()
+        f.name for f in diag_dir.iterdir()
         if f.suffix.lower() in (".png", ".jpg", ".jpeg")
     )
+
+    # Group by camera for the preview gallery
+    cameras = {}
+    for name in images:
+        # Parse r{round}_cam{idx}_{type}.png
+        parts = name.replace(".png", "").replace(".jpg", "").split("_")
+        cam_key = "_".join(parts[:2]) if len(parts) >= 3 else name
+        img_type = parts[2] if len(parts) >= 3 else "combined"
+        if cam_key not in cameras:
+            cameras[cam_key] = {}
+        cameras[cam_key][img_type] = f"/api/refine/diagnostics/{refine_id}/{name}"
+
     return JSONResponse({
         "refine_job_id": refine_id,
+        "cameras": cameras,
         "images": [
             {"name": name, "url": f"/api/refine/diagnostics/{refine_id}/{name}"}
             for name in images
@@ -659,7 +679,10 @@ async def get_refine_diagnostic_image(refine_id: str, filename: str):
 
     # Sanitize filename to prevent path traversal
     safe_name = Path(filename).name
-    image_path = rj.diagnostics_dir / safe_name
+    # Check in diagnostics/ subdirectory first, then root
+    image_path = rj.diagnostics_dir / "diagnostics" / safe_name
+    if not image_path.exists():
+        image_path = rj.diagnostics_dir / safe_name
     if not image_path.exists() or not image_path.is_file():
         raise HTTPException(404, "Diagnostic image not found")
 

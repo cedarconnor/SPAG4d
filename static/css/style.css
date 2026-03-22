@@ -791,6 +791,88 @@ body {
 .dot.yellow { background: #e6d911; }
 .dot.green { background: #1ad933; }
 
+/* ── Diagnostics Gallery ─── */
+.diagnostics-gallery {
+    position: absolute;
+    inset: 0;
+    background: var(--bg-primary);
+    z-index: 100;
+    overflow-y: auto;
+    border-radius: var(--radius-md);
+}
+
+.diag-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: var(--spacing-sm) var(--spacing-md);
+    border-bottom: 1px solid var(--border-color);
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    position: sticky;
+    top: 0;
+    background: var(--bg-primary);
+    z-index: 1;
+}
+
+.diag-content {
+    padding: var(--spacing-sm);
+}
+
+.diag-empty {
+    color: var(--text-secondary);
+    text-align: center;
+    padding: var(--spacing-lg);
+    font-size: 0.8rem;
+}
+
+.diag-camera {
+    margin-bottom: var(--spacing-md);
+}
+
+.diag-camera-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--accent-secondary);
+    margin-bottom: var(--spacing-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.diag-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 4px;
+}
+
+.diag-cell {
+    position: relative;
+}
+
+.diag-cell img {
+    width: 100%;
+    border-radius: 3px;
+    display: block;
+    cursor: pointer;
+}
+
+.diag-cell img:hover {
+    outline: 2px solid var(--accent-primary);
+}
+
+.diag-cell-label {
+    position: absolute;
+    bottom: 2px;
+    left: 2px;
+    font-size: 0.55rem;
+    background: rgba(0, 0, 0, 0.7);
+    color: #fff;
+    padding: 1px 4px;
+    border-radius: 2px;
+    text-transform: uppercase;
+}
+
 .refine-status {
     display: flex;
     align-items: center;

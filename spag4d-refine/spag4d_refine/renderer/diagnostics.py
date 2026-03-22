@@ -9,6 +9,41 @@ import numpy as np
 from PIL import Image
 
 
+def _save_image(arr: np.ndarray, path: str | Path) -> None:
+    """Save a float32 [H,W,3] array as PNG."""
+    img = Image.fromarray((np.clip(arr, 0, 1) * 255).astype(np.uint8))
+    img.save(str(path))
+
+
+def save_individual_diagnostics(
+    diag_dir: Path,
+    prefix: str,
+    splat_rgb: np.ndarray,
+    warp_rgb: np.ndarray,
+    pano_rgb: Optional[np.ndarray] = None,
+    region_map: Optional[np.ndarray] = None,
+    synthesized: Optional[np.ndarray] = None,
+    depth_vis: Optional[np.ndarray] = None,
+) -> None:
+    """Save individual per-camera diagnostic images for the preview gallery."""
+    diag_dir.mkdir(parents=True, exist_ok=True)
+    _save_image(splat_rgb, diag_dir / f"{prefix}_splat.png")
+    _save_image(warp_rgb, diag_dir / f"{prefix}_warp.png")
+    if pano_rgb is not None:
+        _save_image(pano_rgb, diag_dir / f"{prefix}_pano.png")
+    if region_map is not None:
+        H, W = region_map.shape
+        region_vis = np.zeros((H, W, 3), dtype=np.float32)
+        colors = {0: [0.0, 0.8, 0.0], 1: [0.9, 0.9, 0.0], 2: [1.0, 0.5, 0.0], 3: [1.0, 0.0, 0.0]}
+        for val, color in colors.items():
+            region_vis[region_map == val] = color
+        _save_image(region_vis, diag_dir / f"{prefix}_regions.png")
+    if synthesized is not None:
+        _save_image(synthesized, diag_dir / f"{prefix}_synthesized.png")
+    if depth_vis is not None:
+        _save_image(depth_vis, diag_dir / f"{prefix}_depth.png")
+
+
 def save_diagnostic_bundle(
     splat_rgb: np.ndarray,
     warp_rgb: np.ndarray,

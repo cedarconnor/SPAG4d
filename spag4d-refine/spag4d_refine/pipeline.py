@@ -216,6 +216,18 @@ class RefinePipeline:
                         synthesized = synth.repair(
                             warp_result.warped_rgb, gap_mask
                         )
+                    # Save individual diagnostics (including synthesis output)
+                    from .renderer.diagnostics import save_individual_diagnostics
+                    save_individual_diagnostics(
+                        diag_dir=output_dir / "diagnostics",
+                        prefix=f"r{self.session.round_number}_cam{cam_idx}",
+                        splat_rgb=render_result.rgb,
+                        warp_rgb=warp_result.warped_rgb,
+                        pano_rgb=pano_result.rgb if pano_result is not None else None,
+                        region_map=region_map if warp_result is not None else None,
+                        synthesized=synthesized,
+                        depth_vis=depth_vis if 'depth_vis' in dir() else None,
+                    )
                 else:
                     logger.warning("    Synthesis skipped (no backend or no warp)")
                     continue

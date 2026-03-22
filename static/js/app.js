@@ -129,6 +129,16 @@ class SPAG4DApp {
             heatmapBtn.addEventListener('click', () => this.toggleHeatmap());
         }
 
+        // Diagnostics gallery
+        const diagBtn = document.getElementById('show-diagnostics-btn');
+        if (diagBtn) {
+            diagBtn.addEventListener('click', () => this.toggleDiagnostics());
+        }
+        const closeDiagBtn = document.getElementById('close-diagnostics-btn');
+        if (closeDiagBtn) {
+            closeDiagBtn.addEventListener('click', () => this.toggleDiagnostics());
+        }
+
         // Tab switching (RGB / Depth)
         const tabRgb = document.getElementById('tab-rgb');
         const tabDepth = document.getElementById('tab-depth');
@@ -408,6 +418,9 @@ class SPAG4DApp {
         const refineStatus = document.getElementById('refine-status');
         if (refineStatus) refineStatus.style.display = '';
         this.setRefineStatus('Starting refinement...', 0);
+        // Enable diagnostics button during refinement
+        const diagBtn = document.getElementById('show-diagnostics-btn');
+        if (diagBtn) diagBtn.disabled = false;
 
         try {
             const response = await fetch(`/api/refine?${params}`, { method: 'POST' });
@@ -556,6 +569,56 @@ class SPAG4DApp {
         if (btn) btn.classList.toggle('active', this.showingHeatmap);
         const legend = document.getElementById('heatmap-legend');
         if (legend) legend.style.display = this.showingHeatmap ? '' : 'none';
+    }
+
+    // ── Diagnostics Gallery ──
+
+    async toggleDiagnostics() {
+        const gallery = document.getElementById('diagnostics-gallery');
+        if (!gallery) return;
+        const isVisible = gallery.style.display !== 'none';
+        gallery.style.display = isVisible ? 'none' : '';
+        const btn = document.getElementById('show-diagnostics-btn');
+        if (btn) btn.classList.toggle('active', !isVisible);
+        if (!isVisible && this.currentRefineId) {
+            await this.loadDiagnostics();
+        }
+    }
+
+    async loadDiagnostics() {
+        if (!this.currentRefineId) return;
+        const content = document.getElementById('diag-content');
+        if (!content) return;
+        content.innerHTML = '<p class="diag-empty">Loading diagnostics...</p>';
+        try {
+            const res = await fetch(`/api/refine/diagnostics/${this.currentRefineId}`);
+            if (!res.ok) {
+                content.innerHTML = '<p class="diag-empty">No diagnostics available yet.</p>';
+                return;
+            }
+            const data = await res.json();
+            if (!data.cameras || Object.keys(data.cameras).length === 0) {
+                content.innerHTML = '<p class="diag-empty">No diagnostic images found.</p>';
+                return;
+            }
+            const typeLabels = {
+                splat: 'Splat Render', warp: 'Forward Warp', pano: 'Panoramic',
+                regions: 'Region Map', synthesized: 'Synthesis', depth: 'Depth',
+            };
+            let html = '';
+            for (const [camKey, types] of Object.entries(data.cameras)) {
+                const label = camKey.replace('r', 'Round ').replace('_cam', ' - Camera ');
+                html += `<div class="diag-camera"><div class="diag-camera-label">${label}</div><div class="diag-row">`;
+                for (const [type, url] of Object.entries(types)) {
+                    const name = typeLabels[type] || type;
+                    html += `<div class="diag-cell"><img src="${url}" alt="${name}" loading="lazy"><span class="diag-cell-label">${name}</span></div>`;
+                }
+                html += '</div></div>';
+            }
+            content.innerHTML = html;
+        } catch (e) {
+            content.innerHTML = `<p class="diag-empty">Error loading diagnostics: ${e.message}</p>`;
+        }
     }
 
     downloadRefinedFile() {
