@@ -48,8 +48,15 @@ class GsplatRenderer:
 
         H, W = camera.height, camera.width
 
-        # Build viewmat [1, 4, 4] and K [1, 3, 3]
-        viewmat = torch.from_numpy(camera.w2c).float().unsqueeze(0).to(self.device)
+        # Convert OpenGL w2c → OpenCV w2c (gsplat uses OpenCV convention)
+        # OpenGL: +X right, +Y up, -Z forward
+        # OpenCV: +X right, +Y down, +Z forward
+        # Flip Y and Z rows of the w2c matrix
+        w2c_gl = camera.w2c.copy()
+        w2c_cv = w2c_gl.copy()
+        w2c_cv[1, :] = -w2c_gl[1, :]  # flip Y
+        w2c_cv[2, :] = -w2c_gl[2, :]  # flip Z
+        viewmat = torch.from_numpy(w2c_cv).float().unsqueeze(0).to(self.device)
         K = torch.from_numpy(camera.K).float().unsqueeze(0).to(self.device)
 
         # SH coefficients: degree 0 → just colors as [N, 1, 3]

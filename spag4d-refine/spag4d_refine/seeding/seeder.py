@@ -74,19 +74,20 @@ def seed_shadow_gaussians(
     N = len(ys)
     depth = aligned_depth.depth[ys, xs]
 
-    # Unproject to 3D
-    # Camera pixel → camera-space ray
+    # Unproject to 3D using OpenGL camera convention
+    # OpenGL: +X right, +Y up, -Z forward
+    # Pixel (x, y) → camera-space ray with -Z forward
     dirs_cam = np.stack([
         (xs - camera.cx) / camera.fx,
-        (ys - camera.cy) / camera.fy,
-        np.ones(N),
+        -(ys - camera.cy) / camera.fy,  # flip Y (pixel Y-down → OpenGL Y-up)
+        -np.ones(N),                      # -Z forward (OpenGL convention)
     ], axis=-1)
 
     # Normalize
     norms = np.linalg.norm(dirs_cam, axis=-1, keepdims=True)
     dirs_cam = dirs_cam / norms
 
-    # Scale by depth (Z-depth → radial)
+    # Scale by depth (depth is Z-depth along camera forward axis)
     pts_cam = dirs_cam * depth[:, np.newaxis]
 
     # Camera → world

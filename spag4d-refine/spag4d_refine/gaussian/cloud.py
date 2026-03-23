@@ -206,7 +206,11 @@ class GaussianCloud:
         """
         Convert to gsplat-compatible tensors.
 
-        Returns dict with torch tensors, quaternions in WXYZ order (gsplat convention).
+        Returns dict with torch tensors:
+        - quaternions: WXYZ order (gsplat convention)
+        - colors: SH0 coefficients (NOT sRGB — gsplat decodes SH internally)
+        - scales: linear (gsplat uses raw scales, no exp())
+        - opacities: [0,1] (gsplat uses raw opacities, no sigmoid())
         """
         import torch
 
@@ -216,11 +220,14 @@ class GaussianCloud:
             axis=-1,
         )
 
+        # sRGB → SH0 coefficients (gsplat decodes SH internally)
+        sh0_coeffs = (np.clip(self.colors, 0.0, 1.0) - 0.5) / SH_C0
+
         return {
             "means": torch.from_numpy(self.means).float(),
             "scales": torch.from_numpy(self.scales).float(),
             "quats": torch.from_numpy(quats_wxyz).float(),
-            "colors": torch.from_numpy(self.colors).float(),
+            "colors": torch.from_numpy(sh0_coeffs).float(),
             "opacities": torch.from_numpy(self.opacities.squeeze()).float(),
         }
 
