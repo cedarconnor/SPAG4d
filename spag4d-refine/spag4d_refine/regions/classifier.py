@@ -88,6 +88,9 @@ def classify_frame(
     # TYPE_C: warp valid but splat is a gap (confirmed disocclusion)
     result[warp_valid & splat_gap] = RegionType.TYPE_C
 
+    # Warp invalid but splat is solid — not a gap, just outside warp FOV
+    result[~warp_valid & splat_valid] = RegionType.TRUSTED
+
     # TYPE_B: warp invalid, splat weak
     result[~warp_valid & splat_weak] = RegionType.TYPE_B
 
