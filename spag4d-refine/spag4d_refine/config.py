@@ -41,12 +41,13 @@ class RefineConfig:
     # --- Synthesis backend ---
     synthesis_backend: Literal["klein-sharp", "flux-fill", "sdxl", "inspatio"] = "klein-sharp"
 
-    # Klein 9B + ml-sharp LoRA (default)
+    # Klein 9B + ml-sharp LoRA
     klein_base_model: str = "D:/SPAG-4D/models/klein-base-9b"
     klein_sharp_lora: str = "cyrildiagne/flux2-klein9b-lora-mlsharp-3d-repair"
     klein_kv_model: str = "black-forest-labs/FLUX.2-klein-9b-kv"
     klein_use_kv_cache: bool = True
-    klein_num_steps: int = 30  # base model; distilled model uses 4 steps
+    klein_use_lora: bool = False  # disable LoRA for now — base Klein only
+    klein_num_steps: int = 30
     klein_guidance_scale: float = 4.0
     klein_fp8: bool = False
 
