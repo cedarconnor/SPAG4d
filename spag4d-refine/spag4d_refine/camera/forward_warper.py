@@ -142,9 +142,13 @@ def forward_warp_panorama(
     points_3d = pano_center + directions * depth_sub[..., np.newaxis]
 
     # Step 2: Project into novel camera
-    w2c = novel_camera.w2c
+    # Convert OpenGL w2c → OpenCV w2c for projection (Z forward, Y down)
+    w2c_gl = novel_camera.w2c
+    w2c_cv = w2c_gl.copy()
+    w2c_cv[1, :] = -w2c_gl[1, :]  # flip Y
+    w2c_cv[2, :] = -w2c_gl[2, :]  # flip Z
     pts_flat = points_3d.reshape(-1, 3)  # [N, 3]
-    pts_cam = (w2c[:3, :3] @ pts_flat.T + w2c[:3, 3:4]).T  # [N, 3]
+    pts_cam = (w2c_cv[:3, :3] @ pts_flat.T + w2c_cv[:3, 3:4]).T  # [N, 3]
 
     z = pts_cam[:, 2]
     valid = z > 0.01

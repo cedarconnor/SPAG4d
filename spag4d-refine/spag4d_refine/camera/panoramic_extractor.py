@@ -55,11 +55,11 @@ def extract_panoramic_view(
     v = np.arange(H, dtype=np.float64)
     uu, vv = np.meshgrid(u, v, indexing="xy")
 
-    # Pixel → camera-space ray directions
+    # Pixel → camera-space ray directions (OpenGL: +X right, +Y up, -Z forward)
     dirs_cam = np.stack([
         (uu - camera.cx) / camera.fx,
-        (vv - camera.cy) / camera.fy,
-        np.ones_like(uu),
+        -(vv - camera.cy) / camera.fy,  # flip Y (pixel Y-down → OpenGL Y-up)
+        -np.ones_like(uu),               # -Z forward (OpenGL convention)
     ], axis=-1)
 
     # Camera-space → world-space directions
