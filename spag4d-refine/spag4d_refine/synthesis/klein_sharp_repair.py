@@ -267,29 +267,24 @@ class KleinSharpRepairer:
 
         from PIL import Image
 
-        # Build prompt and conditioning based on whether LoRA is active
+        # Build prompt and conditioning images
+        # ml-sharp LoRA expects exactly 2 images:
+        #   Image 1: Reference scene (forward warp = original perspective)
+        #   Image 2: Scene to repair (splat render with gaps)
+        # See: huggingface.co/cyrildiagne/flux2-klein9b-lora-mlsharp-3d-repair
         if self._backend_name == "klein-sharp-lora":
-            # ml-sharp LoRA: use specific prompt format with 6DoF transform
             transform = compute_relative_transform(inputs.ref_c2w, inputs.novel_c2w)
             prompt = build_repair_prompt(transform)
-            images = [
-                self._to_pil(inputs.forward_warped_rgb, size=(1024, 1024)),
-                self._to_pil(inputs.broken_splat_render, size=(1024, 1024)),
-                self._to_pil(inputs.depth_disparity_vis, size=(1024, 1024)),
-            ]
         else:
-            # Base Klein: use the splat render as reference + depth for structure
             prompt = (
-                "Referring to the scene in image 1, complete the missing black "
-                "areas in image 2. Use the depth map in image 3 for spatial "
-                "reference. Fill naturally, matching lighting and textures. "
-                "Photorealistic outdoor scene."
+                "Referring to the scene in image 1, restore the perspective of "
+                "the scene in image 2. Repair the perspective and missing areas."
             )
-            images = [
-                self._to_pil(inputs.forward_warped_rgb, size=(1024, 1024)),
-                self._to_pil(inputs.broken_splat_render, size=(1024, 1024)),
-                self._to_pil(inputs.depth_disparity_vis, size=(1024, 1024)),
-            ]
+
+        images = [
+            self._to_pil(inputs.forward_warped_rgb, size=(1024, 1024)),
+            self._to_pil(inputs.broken_splat_render, size=(1024, 1024)),
+        ]
         logger.info(f"Prompt: {prompt[:80]}...")
 
         result = self._pipeline(
