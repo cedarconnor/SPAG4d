@@ -263,15 +263,16 @@ class KleinSharpRepairer:
 
         from PIL import Image
 
-        # Compute relative transform and build ml-sharp prompt
+        # Build prompt — ml-sharp LoRA was trained with this specific format
         transform = compute_relative_transform(inputs.ref_c2w, inputs.novel_c2w)
         prompt = build_repair_prompt(transform)
-        logger.info(f"Prompt: {prompt}")
+        logger.info(f"Prompt: {prompt[:80]}...")
 
-        # ml-sharp LoRA conditioning (3 images per v6 spec):
-        #   Image 1: reference scene (forward-warped RGB with parallax)
-        #   Image 2: broken novel view (splat render with gaps)
-        #   Image 3: depth/disparity reference for spatial context
+        # Klein conditioning: use the panoramic view as the reference image
+        # and depth map for spatial structure
+        # Image 1: the forward-warped panorama (best available reference)
+        # Image 2: the broken splat render (shows where gaps are)
+        # Image 3: depth map for spatial context
         img1 = self._to_pil(inputs.forward_warped_rgb, size=(1024, 1024))
         img2 = self._to_pil(inputs.broken_splat_render, size=(1024, 1024))
         img3 = self._to_pil(inputs.depth_disparity_vis, size=(1024, 1024))
