@@ -31,7 +31,6 @@ class SPAG4DApp {
 
         // Parameters
         this.depthModelInput = document.getElementById('depth-model');
-        // SHARP removed — kept for backward compat
 
         this.strideInput = document.getElementById('stride');
         this.depthMinInput = document.getElementById('depth-min');
@@ -48,9 +47,6 @@ class SPAG4DApp {
         this.fileInput.addEventListener('change', (e) => this.handleFileSelect(e));
         this.convertBtn.addEventListener('click', () => this.startConversion());
         this.downloadPlyBtn.addEventListener('click', () => this.downloadFile());
-
-        // SHARP refine toggle: show/hide SHARP-only params
-        }
 
         // Reset View Button
         const resetBtn = document.getElementById('reset-view-btn');
@@ -151,14 +147,6 @@ class SPAG4DApp {
 
         // Preload test image
         this.preloadTestImage();
-    }
-
-    toggleSharpParams() {
-        // SHARP removed
-        const show = false;
-        document.querySelectorAll('.sharp-only').forEach(el => {
-            el.style.display = show ? '' : 'none';
-        });
     }
 
     ensureViewer() {
