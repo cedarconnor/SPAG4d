@@ -50,70 +50,85 @@ def _convert_bfl_lora_to_diffusers(state_dict: Dict) -> Dict:
     """
     Convert ml-sharp LoRA keys from BFL naming to diffusers naming.
 
-    BFL (original Flux):            Diffusers:
-      double_blocks.N.img_attn.qkv  -> transformer.transformer_blocks.N.attn.to_q/k/v  (split)
-      double_blocks.N.img_attn.proj -> transformer.transformer_blocks.N.attn.to_out.0
-      double_blocks.N.img_mlp.0     -> transformer.transformer_blocks.N.ff.linear_in
-      double_blocks.N.img_mlp.2     -> transformer.transformer_blocks.N.ff.linear_out
-      double_blocks.N.txt_attn.qkv  -> transformer.transformer_blocks.N.attn.add_q_proj/... (split)
-      double_blocks.N.txt_attn.proj -> transformer.transformer_blocks.N.attn.to_add_out
-      double_blocks.N.txt_mlp.0     -> transformer.transformer_blocks.N.ff_context.linear_in
-      double_blocks.N.txt_mlp.2     -> transformer.transformer_blocks.N.ff_context.linear_out
-      single_blocks.N.linear1       -> transformer.single_transformer_blocks.N.attn.to_qkv_mlp_proj
-      single_blocks.N.linear2       -> transformer.single_transformer_blocks.N.attn.to_out
+    BFL (original Flux):            Diffusers (Flux2Transformer2DModel):
+      double_blocks.N.img_attn.qkv  -> SPLIT into attn.to_q / to_k / to_v
+      double_blocks.N.img_attn.proj -> transformer_blocks.N.attn.to_out.0
+      double_blocks.N.img_mlp.0     -> transformer_blocks.N.ff.linear_in
+      double_blocks.N.img_mlp.2     -> transformer_blocks.N.ff.linear_out
+      double_blocks.N.txt_attn.qkv  -> SPLIT into attn.add_q_proj / add_k_proj / add_v_proj
+      double_blocks.N.txt_attn.proj -> transformer_blocks.N.attn.to_add_out
+      double_blocks.N.txt_mlp.0     -> transformer_blocks.N.ff_context.linear_in
+      double_blocks.N.txt_mlp.2     -> transformer_blocks.N.ff_context.linear_out
+      single_blocks.N.linear1       -> single_transformer_blocks.N.attn.to_qkv_mlp_proj
+      single_blocks.N.linear2       -> single_transformer_blocks.N.attn.to_out
 
-    For QKV LoRA layers, the LoRA targets the fused QKV weight. Diffusers
-    splits Q/K/V into separate modules, so we need to map the fused LoRA
-    to each split target.
+    CRITICAL: Double-block QKV LoRA targets a fused [3*hidden, in] weight but
+    diffusers splits Q/K/V into separate modules. We must keep the raw A/B
+    tensors and handle splitting during injection (see _inject_lora_manual).
     """
     converted = {}
 
-    # Simple 1:1 renames (no QKV splitting needed for LoRA — the LoRA
-    # matrices target the fused weight and diffusers will handle the
-    # shape matching during injection)
+    # 1:1 renames for non-fused layers
     rename_map = {
-        # Double block image stream
-        "img_attn.qkv": "attn.to_qkv",        # fused QKV
+        # Double block image stream (non-QKV)
         "img_attn.proj": "attn.to_out.0",
         "img_mlp.0": "ff.linear_in",
         "img_mlp.2": "ff.linear_out",
-        # Double block text stream
-        "txt_attn.qkv": "attn.add_qkv_proj",   # fused QKV
+        # Double block text stream (non-QKV)
         "txt_attn.proj": "attn.to_add_out",
         "txt_mlp.0": "ff_context.linear_in",
         "txt_mlp.2": "ff_context.linear_out",
     }
 
+    # QKV fused keys → mark with __FUSED_QKV__ prefix for special handling
+    # during injection. These get split into 3 separate module targets.
+    qkv_fused_map = {
+        "img_attn.qkv": "__FUSED_IMG_QKV__",
+        "txt_attn.qkv": "__FUSED_TXT_QKV__",
+    }
+
     for key, tensor in state_dict.items():
         new_key = key
 
-        # double_blocks.N.xxx -> transformer.transformer_blocks.N.xxx
         if key.startswith("double_blocks."):
             m = re.match(r"double_blocks\.(\d+)\.(.*)", key)
             if m:
                 block_idx = m.group(1)
                 remainder = m.group(2)
-                # Apply renames
-                for old, new in rename_map.items():
-                    if remainder.startswith(old):
-                        remainder = remainder.replace(old, new, 1)
-                        break
-                new_key = f"transformer.transformer_blocks.{block_idx}.{remainder}"
 
-        # single_blocks.N.xxx -> transformer.single_transformer_blocks.N.xxx
+                # Check for fused QKV first
+                is_fused = False
+                for old, marker in qkv_fused_map.items():
+                    if remainder.startswith(old):
+                        suffix = remainder[len(old):]  # e.g. ".lora_A.weight"
+                        new_key = f"{marker}.transformer_blocks.{block_idx}{suffix}"
+                        is_fused = True
+                        break
+
+                if not is_fused:
+                    for old, new in rename_map.items():
+                        if remainder.startswith(old):
+                            remainder = remainder.replace(old, new, 1)
+                            break
+                    new_key = f"transformer.transformer_blocks.{block_idx}.{remainder}"
+
         elif key.startswith("single_blocks."):
             m = re.match(r"single_blocks\.(\d+)\.(.*)", key)
             if m:
                 block_idx = m.group(1)
                 remainder = m.group(2)
-                # linear1 -> attn.to_qkv_mlp_proj, linear2 -> attn.to_out
                 remainder = remainder.replace("linear1", "attn.to_qkv_mlp_proj", 1)
                 remainder = remainder.replace("linear2", "attn.to_out", 1)
                 new_key = f"transformer.single_transformer_blocks.{block_idx}.{remainder}"
 
         converted[new_key] = tensor
 
-    logger.info(f"Converted {len(converted)} LoRA keys (BFL -> diffusers)")
+    n_fused = sum(1 for k in converted if k.startswith("__FUSED_"))
+    n_direct = len(converted) - n_fused
+    logger.info(
+        f"Converted {len(converted)} LoRA keys (BFL -> diffusers): "
+        f"{n_direct} direct, {n_fused} fused-QKV (will be split during injection)"
+    )
     return converted
 
 
@@ -203,54 +218,137 @@ class KleinSharpRepairer:
         self._inject_lora_manual(converted_sd)
 
     def _inject_lora_manual(self, lora_sd: Dict):
-        """Manually inject LoRA weights into transformer modules (W' = W + B @ A)."""
+        """
+        Manually inject LoRA weights into transformer modules.
+
+        Handles two cases:
+        1. Direct injection (W' = W + B @ A) for 1:1 mapped modules
+        2. Fused QKV splitting: compute B @ A, split along dim 0 into
+           3 equal chunks, apply each to separate Q/K/V modules
+        """
         import torch
 
         transformer = self._pipeline.transformer
         injected = 0
+        skipped = 0
 
-        # Group by target module
-        lora_pairs = {}
+        # Separate fused-QKV keys from direct keys
+        fused_pairs = {}   # marker -> {block_path -> {lora_A, lora_B}}
+        direct_pairs = {}  # module_path -> {lora_A, lora_B}
+
         for key, tensor in lora_sd.items():
-            # Strip 'transformer.' prefix
-            if key.startswith("transformer."):
-                key = key[len("transformer."):]
-            # Parse: module_path.lora_A.weight or module_path.lora_B.weight
-            m = re.match(r"(.+)\.(lora_[AB])\.weight", key)
+            # Check for fused QKV markers from _convert_bfl_lora_to_diffusers
+            if key.startswith("__FUSED_"):
+                m = re.match(r"(__FUSED_\w+__)\.(.+)\.(lora_[AB])\.weight", key)
+                if m:
+                    marker = m.group(1)
+                    block_path = m.group(2)
+                    ab = m.group(3)
+                    fused_key = f"{marker}.{block_path}"
+                    fused_pairs.setdefault(fused_key, {})[ab] = tensor
+                continue
+
+            # Direct (non-fused) keys
+            clean = key
+            if clean.startswith("transformer."):
+                clean = clean[len("transformer."):]
+            m = re.match(r"(.+)\.(lora_[AB])\.weight", clean)
             if m:
                 module_path = m.group(1)
                 ab = m.group(2)
-                lora_pairs.setdefault(module_path, {})[ab] = tensor
+                direct_pairs.setdefault(module_path, {})[ab] = tensor
 
-        for module_path, matrices in lora_pairs.items():
+        # --- Direct injection ---
+        for module_path, matrices in direct_pairs.items():
             if "lora_A" not in matrices or "lora_B" not in matrices:
                 continue
 
-            # Find the target module
-            parts = module_path.split(".")
-            target = transformer
-            try:
-                for p in parts:
-                    if p.isdigit():
-                        target = target[int(p)]
-                    else:
-                        target = getattr(target, p)
-            except (AttributeError, IndexError, KeyError):
-                logger.debug(f"Module not found: {module_path}")
+            target = self._resolve_module(transformer, module_path)
+            if target is None or not hasattr(target, "weight"):
+                skipped += 1
                 continue
 
-            if not hasattr(target, "weight"):
-                continue
-
-            # Apply LoRA: W' = W + B @ A (compute on GPU for speed)
-            compute_device = "cuda" if torch.cuda.is_available() else target.weight.device
-            A = matrices["lora_A"].to(target.weight.dtype).to(compute_device)
-            B = matrices["lora_B"].to(target.weight.dtype).to(compute_device)
-            delta = (B @ A).to(target.weight.device)
+            delta = self._compute_delta(matrices, target.weight)
             target.weight.data += delta
             injected += 1
 
-        logger.info(f"Manually injected LoRA into {injected} modules")
+        # --- Fused QKV injection (split into separate Q, K, V) ---
+        # Map fused markers to their 3 target module suffixes
+        fused_targets = {
+            "__FUSED_IMG_QKV__": ["attn.to_q", "attn.to_k", "attn.to_v"],
+            "__FUSED_TXT_QKV__": ["attn.add_q_proj", "attn.add_k_proj", "attn.add_v_proj"],
+        }
+
+        for fused_key, matrices in fused_pairs.items():
+            if "lora_A" not in matrices or "lora_B" not in matrices:
+                continue
+
+            # Parse: __FUSED_IMG_QKV__.transformer_blocks.N
+            m = re.match(r"(__FUSED_\w+__)\.(.+)", fused_key)
+            if not m:
+                continue
+            marker = m.group(1)
+            block_path = m.group(2)
+            target_suffixes = fused_targets.get(marker)
+            if not target_suffixes:
+                continue
+
+            # Find the first target to get dtype/device
+            first_target = self._resolve_module(transformer, f"{block_path}.{target_suffixes[0]}")
+            if first_target is None or not hasattr(first_target, "weight"):
+                skipped += 1
+                logger.debug(f"Fused QKV target not found: {block_path}.{target_suffixes[0]}")
+                continue
+
+            # Compute full fused delta: [3*hidden, in_features]
+            compute_device = "cuda" if torch.cuda.is_available() else first_target.weight.device
+            A = matrices["lora_A"].to(first_target.weight.dtype).to(compute_device)
+            B = matrices["lora_B"].to(first_target.weight.dtype).to(compute_device)
+            fused_delta = (B @ A)  # [3*hidden, in_features]
+
+            # Split into 3 equal chunks along dim 0
+            chunk_size = fused_delta.shape[0] // 3
+            chunks = fused_delta.split(chunk_size, dim=0)
+            if len(chunks) != 3:
+                logger.warning(f"Fused QKV split failed: got {len(chunks)} chunks for {fused_key}")
+                skipped += 1
+                continue
+
+            for suffix, chunk in zip(target_suffixes, chunks):
+                target = self._resolve_module(transformer, f"{block_path}.{suffix}")
+                if target is None or not hasattr(target, "weight"):
+                    skipped += 1
+                    continue
+                target.weight.data += chunk.to(target.weight.device)
+                injected += 1
+
+        logger.info(
+            f"Manually injected LoRA into {injected} modules "
+            f"({skipped} skipped/not found)"
+        )
+
+    @staticmethod
+    def _resolve_module(root, path: str):
+        """Resolve a dotted module path like 'transformer_blocks.0.attn.to_q'."""
+        target = root
+        try:
+            for p in path.split("."):
+                if p.isdigit():
+                    target = target[int(p)]
+                else:
+                    target = getattr(target, p)
+            return target
+        except (AttributeError, IndexError, KeyError):
+            return None
+
+    @staticmethod
+    def _compute_delta(matrices: Dict, weight) -> "torch.Tensor":
+        """Compute LoRA delta (B @ A) on GPU, move to weight's device."""
+        import torch
+        compute_device = "cuda" if torch.cuda.is_available() else weight.device
+        A = matrices["lora_A"].to(weight.dtype).to(compute_device)
+        B = matrices["lora_B"].to(weight.dtype).to(compute_device)
+        return (B @ A).to(weight.device)
 
     def repair(self, inputs: RepairInput) -> np.ndarray:
         """

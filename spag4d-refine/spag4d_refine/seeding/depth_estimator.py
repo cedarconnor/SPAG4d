@@ -91,30 +91,40 @@ def estimate_and_align_depth(
     # Estimate relative depth
     raw_depth = estimate_depth(synthesized_rgb, device=device)
 
+    # DepthAnythingV2 outputs disparity-like values (close=large, far=small).
+    # Pre-invert so that close=small, far=large (matching Z-depth convention)
+    # before affine alignment. This avoids negative alignment scales that
+    # cause clipping issues.
+    raw_max = np.percentile(raw_depth, 99)
+    if raw_max > 1e-6:
+        raw_depth_inv = raw_max - raw_depth  # now close=small, far=large
+    else:
+        raw_depth_inv = raw_depth
+
     # Affine alignment at overlap (non-gap, warp-valid) pixels
     overlap = warp_valid & ~gap_mask
     if overlap.sum() < 10:
         logger.warning("Too few overlap pixels for depth alignment, using raw depth")
         return AlignedDepth(
-            depth=raw_depth,
-            confidence=np.ones_like(raw_depth) * 0.5,
+            depth=raw_depth_inv,
+            confidence=np.ones_like(raw_depth_inv) * 0.5,
             scale=1.0,
             offset=0.0,
         )
 
-    # Least squares: warp_depth = scale * raw_depth + offset
-    A = np.stack([raw_depth[overlap], np.ones(overlap.sum())], axis=-1)
+    # Least squares: warp_depth = scale * raw_inv + offset
+    A = np.stack([raw_depth_inv[overlap], np.ones(overlap.sum())], axis=-1)
     b = warp_depth[overlap]
 
-    # Robust: use only finite values
-    finite = np.isfinite(b) & np.isfinite(A[:, 0])
+    # Robust: use only finite values with positive warp depth
+    finite = np.isfinite(b) & np.isfinite(A[:, 0]) & (b > 0.01)
     A = A[finite]
     b = b[finite]
 
     if len(b) < 10:
         return AlignedDepth(
-            depth=raw_depth,
-            confidence=np.ones_like(raw_depth) * 0.5,
+            depth=raw_depth_inv,
+            confidence=np.ones_like(raw_depth_inv) * 0.5,
             scale=1.0,
             offset=0.0,
         )
@@ -122,8 +132,16 @@ def estimate_and_align_depth(
     result = np.linalg.lstsq(A, b, rcond=None)
     scale, offset = result[0]
 
+    # If scale is still negative (shouldn't happen after inversion, but safety check)
+    if scale < 0:
+        logger.warning(f"Negative alignment scale {scale:.3f} after inversion, using abs")
+        scale = abs(scale)
+
+    logger.info(f"Depth alignment: scale={scale:.3f}, offset={offset:.3f} "
+                f"(raw range: {raw_depth.min():.1f}-{raw_depth.max():.1f})")
+
     # Apply alignment
-    aligned_depth = scale * raw_depth + offset
+    aligned_depth = scale * raw_depth_inv + offset
     aligned_depth = np.clip(aligned_depth, 0.01, None)
 
     # Confidence: high at overlap, decays into gap regions

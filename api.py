@@ -4,6 +4,7 @@ FastAPI backend for SPAG-4D web UI.
 """
 
 import asyncio
+import logging
 import time
 import uuid
 from pathlib import Path
@@ -11,6 +12,12 @@ import shutil
 import subprocess
 from typing import Optional
 from contextlib import asynccontextmanager
+
+# Configure logging so refine pipeline messages are visible
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(name)s] %(message)s",
+)
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles

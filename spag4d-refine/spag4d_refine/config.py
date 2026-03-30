@@ -46,7 +46,7 @@ class RefineConfig:
     klein_sharp_lora: str = "cyrildiagne/flux2-klein9b-lora-mlsharp-3d-repair"
     klein_kv_model: str = "black-forest-labs/FLUX.2-klein-9b-kv"
     klein_use_kv_cache: bool = True
-    klein_use_lora: bool = False  # disable LoRA for now — base Klein only
+    klein_use_lora: bool = True
     klein_num_steps: int = 30
     klein_guidance_scale: float = 4.0
     klein_fp8: bool = False
@@ -74,10 +74,11 @@ class RefineConfig:
     depth_hypotheses: int = 1
 
     # --- Seeding ---
-    shadow_opacity: float = 0.5
+    shadow_opacity: float = 0.85
     shadow_validation_iters: int = 750
     promotion_consistency_threshold: float = 0.3
-    confidence_decay_pixels: int = 150
+    confidence_decay_pixels: int = 50
+    min_seed_confidence: float = 0.3
 
     # --- Fine-tuning ---
     finetune_iterations: int = 4000

@@ -57,11 +57,15 @@ def validate_shadow_gaussians(
         w2c = cam.w2c
         pts_cam = (w2c[:3, :3] @ seeded_means.T + w2c[:3, 3:4]).T
 
+        # OpenGL convention: camera looks along -Z, so points in front
+        # have negative Z in camera space
         z = pts_cam[:, 2]
-        in_front = z > 0.01
+        in_front = z < -0.01
 
-        u = pts_cam[:, 0] / np.clip(z, 0.01, None) * cam.fx + cam.cx
-        v = pts_cam[:, 1] / np.clip(z, 0.01, None) * cam.fy + cam.cy
+        # Project to pixel coords (OpenGL: divide by -z for positive depth)
+        neg_z = np.clip(-z, 0.01, None)
+        u = pts_cam[:, 0] / neg_z * cam.fx + cam.cx
+        v = cam.cy - pts_cam[:, 1] / neg_z * cam.fy
 
         in_bounds = (
             in_front
@@ -82,7 +86,11 @@ def validate_shadow_gaussians(
 
     n_promoted = int(np.sum(promote))
     n_pruned = n_seeded - n_promoted
-    logger.info(f"Shadow validation: {n_promoted} promoted, {n_pruned} pruned")
+    logger.info(
+        f"Shadow validation: {n_seeded:,} seeded → "
+        f"{n_promoted:,} promoted, {n_pruned:,} pruned "
+        f"(threshold={consistency_threshold:.0%}, {n_cams} cameras)"
+    )
 
     cloud.provenance = new_prov
     return cloud

@@ -123,6 +123,10 @@ class RefinePipeline:
             gaussians_promoted = 0
             gaussians_pruned = 0
 
+            # Collect synthesized images + cameras for post-seeding optimization
+            synth_targets = []   # [H, W, 3] float32 sRGB
+            synth_cameras = []   # PinholeCamera
+
             for cam_idx, camera in enumerate(cameras):
                 cam_pct = int(100 * cam_idx / len(cameras))
                 _progress(self.session.round_number, f"Camera {cam_idx + 1}/{len(cameras)}", cam_pct)
@@ -197,14 +201,31 @@ class RefinePipeline:
                     from .synthesis.klein_sharp_repair import RepairInput
                     from .synthesis.depth_visualizer import depth_to_disparity_image
 
-                    depth_vis = depth_to_disparity_image(
-                        warp_result.warped_depth, warp_result.valid_mask
-                    )
+                    # Build dense depth for visualization by filling forward-warp
+                    # holes with panoramic extraction depth (same pattern as RGB).
+                    # Without this, the depth vis shows striations from sparse warp.
+                    filled_depth = warp_result.warped_depth.copy()
+                    filled_valid = warp_result.valid_mask.copy()
+                    if pano_result is not None:
+                        unfilled = ~warp_result.valid_mask
+                        filled_depth[unfilled] = pano_result.depth[unfilled]
+                        filled_valid[unfilled] = pano_result.valid_mask[unfilled]
+
+                    depth_vis = depth_to_disparity_image(filled_depth, filled_valid)
+
+                    # Build reference image: forward warp (parallax-correct) with
+                    # panoramic extraction fallback for unfilled pixels.
+                    # The forward warp is sparse, so we need the pano fill to
+                    # give Klein a usable reference.
+                    reference_rgb = warp_result.warped_rgb.copy()
+                    if pano_result is not None:
+                        unfilled = ~warp_result.valid_mask
+                        reference_rgb[unfilled] = pano_result.rgb[unfilled]
 
                     # Use appropriate repair interface
                     if self.config.synthesis_backend == "klein-sharp":
                         repair_input = RepairInput(
-                            forward_warped_rgb=warp_result.warped_rgb,
+                            forward_warped_rgb=reference_rgb,
                             broken_splat_render=render_result.rgb,
                             depth_disparity_vis=depth_vis,
                             ref_c2w=np.eye(4),  # Panorama center
@@ -222,12 +243,15 @@ class RefinePipeline:
                         diag_dir=output_dir / "diagnostics",
                         prefix=f"r{self.session.round_number}_cam{cam_idx}",
                         splat_rgb=render_result.rgb,
-                        warp_rgb=warp_result.warped_rgb,
+                        warp_rgb=reference_rgb,
                         pano_rgb=pano_result.rgb if pano_result is not None else None,
                         region_map=region_map if warp_result is not None else None,
                         synthesized=synthesized,
-                        depth_vis=depth_vis if 'depth_vis' in dir() else None,
+                        depth_vis=depth_vis,
                     )
+                    # Collect for post-seeding optimization
+                    synth_targets.append(synthesized)
+                    synth_cameras.append(camera)
                 else:
                     logger.warning("    Synthesis skipped (no backend or no warp)")
                     continue
@@ -246,9 +270,11 @@ class RefinePipeline:
                     shadows = seed_shadow_gaussians(
                         aligned_depth, synthesized, gap_mask, camera,
                         shadow_opacity=self.config.shadow_opacity,
+                        min_confidence=getattr(self.config, 'min_seed_confidence', 0.3),
                     )
 
                     gaussians_seeded += len(shadows)
+                    logger.info(f"    Camera {cam_idx}: seeded {len(shadows):,} shadow Gaussians")
                     if len(shadows) > 0:
                         cloud = cloud.merge(shadows)
 
@@ -262,6 +288,22 @@ class RefinePipeline:
             gaussians_promoted = int(np.sum(
                 cloud.provenance == GaussianSource.PROMOTED
             ))
+
+            # === Stage 7b: Masked optimization ===
+            if synth_targets and self.config.finetune_iterations > 0:
+                _progress(self.session.round_number, "Optimizing", 92)
+                from .optimization.local_refiner import refine_gaussians
+                logger.info(f"  Optimizing against {len(synth_targets)} synthesized views "
+                            f"({self.config.finetune_iterations} iters)")
+                cloud = refine_gaussians(
+                    cloud,
+                    target_images=synth_targets,
+                    cameras=synth_cameras,
+                    iterations=self.config.finetune_iterations,
+                    anchor_loss_weight=self.config.anchor_loss_weight,
+                    original_lr_scale=self.config.original_gaussian_lr_scale,
+                    device=self.config.device,
+                )
 
             # === Stage 8: Validation & pruning ===
             _progress(self.session.round_number, "Pruning", 95)

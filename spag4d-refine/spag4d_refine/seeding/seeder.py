@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Optional
 
@@ -11,6 +12,42 @@ from ..camera.pinhole import PinholeCamera
 from ..gaussian.cloud import GaussianCloud
 from ..gaussian.provenance import GaussianSource
 from .depth_estimator import AlignedDepth
+
+logger = logging.getLogger(__name__)
+
+
+def _billboard_quaternions(normal: np.ndarray, n: int) -> np.ndarray:
+    """
+    Compute XYZW quaternion that rotates [0, 0, 1] to the given normal direction.
+
+    All N Gaussians get the same orientation (billboard facing camera).
+    Returns [N, 4] float32 in XYZW order.
+    """
+    # Target: rotate Z-axis to `normal`
+    z_axis = np.array([0, 0, 1], dtype=np.float64)
+    normal = np.asarray(normal, dtype=np.float64)
+    norm = np.linalg.norm(normal)
+    if norm < 1e-8:
+        return np.tile(np.array([0, 0, 0, 1], dtype=np.float32), (n, 1))
+    normal = normal / norm
+
+    dot = np.dot(z_axis, normal)
+    if dot > 0.9999:
+        # Already aligned
+        return np.tile(np.array([0, 0, 0, 1], dtype=np.float32), (n, 1))
+    if dot < -0.9999:
+        # Opposite: 180 rotation around X
+        return np.tile(np.array([1, 0, 0, 0], dtype=np.float32), (n, 1))
+
+    # Rotation axis = cross(z, normal), angle = acos(dot)
+    axis = np.cross(z_axis, normal)
+    axis = axis / np.linalg.norm(axis)
+    angle = np.arccos(np.clip(dot, -1, 1))
+    half = angle / 2
+    w = np.cos(half)
+    xyz = axis * np.sin(half)
+    quat = np.array([xyz[0], xyz[1], xyz[2], w], dtype=np.float32)
+    return np.tile(quat, (n, 1))
 
 
 def seed_shadow_gaussians(
@@ -58,8 +95,14 @@ def seed_shadow_gaussians(
 
     # Filter by confidence
     conf = aligned_depth.confidence[ys, xs]
+    n_before = len(ys)
     valid = conf >= min_confidence
     ys, xs = ys[valid], xs[valid]
+    logger.info(
+        f"Seeding: {gap_mask.sum():,} gap pixels → {n_before:,} sampled (stride={stride}) "
+        f"→ {len(ys):,} pass confidence (min={min_confidence}, "
+        f"depth scale={aligned_depth.scale:.3f}, offset={aligned_depth.offset:.3f})"
+    )
 
     if len(ys) == 0:
         return GaussianCloud(
@@ -74,21 +117,19 @@ def seed_shadow_gaussians(
     N = len(ys)
     depth = aligned_depth.depth[ys, xs]
 
-    # Unproject to 3D using OpenGL camera convention
-    # OpenGL: +X right, +Y up, -Z forward
-    # Pixel (x, y) → camera-space ray with -Z forward
-    dirs_cam = np.stack([
-        (xs - camera.cx) / camera.fx,
-        -(ys - camera.cy) / camera.fy,  # flip Y (pixel Y-down → OpenGL Y-up)
-        -np.ones(N),                      # -Z forward (OpenGL convention)
+    # Unproject to 3D using Z-depth directly (NOT radial distance).
+    # OpenGL convention: +X right, +Y up, -Z forward.
+    # depth is Z-depth (distance along camera forward axis), so:
+    #   x_cam = (px - cx) / fx * z_depth
+    #   y_cam = -(py - cy) / fy * z_depth  (flip Y: pixel Y-down → OpenGL Y-up)
+    #   z_cam = -z_depth                    (-Z forward in OpenGL)
+    # This avoids the bug where normalizing rays then scaling by Z-depth
+    # places edge pixels too close to the camera.
+    pts_cam = np.stack([
+        (xs - camera.cx) / camera.fx * depth,
+        -(ys - camera.cy) / camera.fy * depth,
+        -depth,
     ], axis=-1)
-
-    # Normalize
-    norms = np.linalg.norm(dirs_cam, axis=-1, keepdims=True)
-    dirs_cam = dirs_cam / norms
-
-    # Scale by depth (depth is Z-depth along camera forward axis)
-    pts_cam = dirs_cam * depth[:, np.newaxis]
 
     # Camera → world
     c2w = camera.c2w
@@ -97,17 +138,23 @@ def seed_shadow_gaussians(
     # Colors from synthesized image
     colors = synthesized_rgb[ys, xs].astype(np.float32)
 
-    # Scales: depth-proportional (similar to SPAG converter)
-    angular_spacing = math.pi / H
-    base_scale = depth * angular_spacing * stride
-    scale_xy = base_scale * 0.5  # Conservative
-    scale_z = base_scale * 0.1   # Thin disc
+    # Scales: pixel-footprint-proportional
+    # Each pixel covers ~(depth / focal_length) world units at that depth
+    pixel_size_x = depth / camera.fx * stride
+    pixel_size_y = depth / camera.fy * stride
+    scale_xy = np.maximum(pixel_size_x, pixel_size_y) * 0.5
+    scale_z = scale_xy * 0.2  # Thin disc (flattened along viewing direction)
     scales = np.stack([scale_xy, scale_xy, scale_z], axis=-1).astype(np.float32)
 
-    # Quaternions: identity (XYZW)
-    quats = np.tile(np.array([0, 0, 0, 1], dtype=np.float32), (N, 1))
+    # Quaternions: billboard facing the camera (orient disc normal toward camera)
+    # Camera forward in world space is -c2w[:3, 2] (OpenGL: -Z forward)
+    cam_forward = -c2w[:3, 2]  # unit vector from camera into scene
+    # We want each Gaussian's local Z to point back toward the camera
+    # i.e., the disc normal = -cam_forward (pointing AT camera)
+    # Compute rotation from identity Z-axis [0,0,1] to -cam_forward
+    quats = _billboard_quaternions(-cam_forward, N)
 
-    # Opacities: conservative
+    # Opacities: fill gaps convincingly (higher than conservative 0.5)
     opacities = np.full((N, 1), shadow_opacity, dtype=np.float32)
 
     # Provenance
