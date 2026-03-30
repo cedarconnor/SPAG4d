@@ -33,21 +33,26 @@ def refine_gaussians(
     cloud: GaussianCloud,
     target_images: List[np.ndarray],
     cameras: List[PinholeCamera],
+    gap_masks: Optional[List[np.ndarray]] = None,
     iterations: int = 4000,
     anchor_loss_weight: float = 8.0,
     original_lr_scale: float = 0.05,
     device: str = "cuda",
 ) -> GaussianCloud:
     """
-    Constrained optimization of Gaussian parameters using gsplat.
+    Masked optimization of Gaussian parameters using gsplat.
 
-    Freezes (or heavily penalizes) original Gaussians while optimizing
-    seeded/promoted ones to match target images.
+    Only computes photometric loss in gap regions (where seeded Gaussians
+    need to match Klein's output). Original good areas are protected —
+    their Gaussians receive near-zero gradients from both the masked loss
+    and the reduced learning rate.
 
     Args:
         cloud: GaussianCloud with mixed provenance
         target_images: List of [H, W, 3] float32 sRGB target images
         cameras: Corresponding cameras for each target image
+        gap_masks: Optional list of [H, W] bool masks (True = gap/repair region).
+            If provided, photometric loss is only computed in masked areas.
         iterations: Number of optimization iterations
         anchor_loss_weight: Weight for anchor loss (prevents original drift)
         original_lr_scale: Learning rate multiplier for original Gaussians
@@ -102,6 +107,19 @@ def refine_gaussians(
         torch.from_numpy(img).float().to(dev) for img in target_images
     ]
 
+    # Gap masks: True = repair region where loss is computed.
+    # If no masks provided, fall back to full-frame loss.
+    if gap_masks is not None:
+        mask_tensors = [
+            torch.from_numpy(m.astype(np.float32)).to(dev) for m in gap_masks
+        ]
+        has_masks = True
+        mask_pct = np.mean([m.mean() for m in gap_masks]) * 100
+        logger.info(f"  Masked optimization: loss computed in gap regions only ({mask_pct:.1f}% of frame)")
+    else:
+        mask_tensors = None
+        has_masks = False
+
     # Camera matrices: convert OpenGL → OpenCV for gsplat
     K_list = [
         torch.from_numpy(cam.K).float().unsqueeze(0).to(dev) for cam in cameras
@@ -150,8 +168,16 @@ def refine_gaussians(
 
         rendered = renders[0, :, :, :3]
 
-        # L1 photometric loss (in SH0 space)
-        photo_loss = (rendered - target).abs().mean()
+        # L1 photometric loss — masked to gap regions only
+        pixel_error = (rendered - target).abs()
+        if has_masks:
+            mask = mask_tensors[view_idx].unsqueeze(-1)  # [H, W, 1]
+            # Loss only in gap regions; good areas contribute zero gradient
+            masked_error = pixel_error * mask
+            n_masked = mask.sum().clamp(min=1)
+            photo_loss = masked_error.sum() / (n_masked * 3)
+        else:
+            photo_loss = pixel_error.mean()
 
         # Anchor loss: penalize drift of original Gaussians
         means_diff = (means[is_original] - anchor_means[is_original]).pow(2).sum(dim=-1).mean()

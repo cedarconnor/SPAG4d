@@ -123,9 +123,10 @@ class RefinePipeline:
             gaussians_promoted = 0
             gaussians_pruned = 0
 
-            # Collect synthesized images + cameras for post-seeding optimization
+            # Collect synthesized images + cameras + masks for post-seeding optimization
             synth_targets = []   # [H, W, 3] float32 sRGB
             synth_cameras = []   # PinholeCamera
+            synth_masks = []     # [H, W] bool gap masks
 
             for cam_idx, camera in enumerate(cameras):
                 cam_pct = int(100 * cam_idx / len(cameras))
@@ -252,6 +253,7 @@ class RefinePipeline:
                     # Collect for post-seeding optimization
                     synth_targets.append(synthesized)
                     synth_cameras.append(camera)
+                    synth_masks.append(gap_mask)
                 else:
                     logger.warning("    Synthesis skipped (no backend or no warp)")
                     continue
@@ -299,6 +301,7 @@ class RefinePipeline:
                     cloud,
                     target_images=synth_targets,
                     cameras=synth_cameras,
+                    gap_masks=synth_masks,
                     iterations=self.config.finetune_iterations,
                     anchor_loss_weight=self.config.anchor_loss_weight,
                     original_lr_scale=self.config.original_gaussian_lr_scale,
