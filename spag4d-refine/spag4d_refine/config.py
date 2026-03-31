@@ -17,7 +17,7 @@ class RefineConfig:
 
     # --- Camera ---
     capture_mode: Literal["keyframe", "path"] = "keyframe"
-    camera_preset: str = "orbit"
+    camera_preset: str = "auto"
     camera_vfov_deg: float = 60.0
     render_resolution: Tuple[int, int] = (1920, 1080)
     orbit_radius: float = 0.5

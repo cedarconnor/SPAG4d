@@ -83,14 +83,25 @@ class RefinePipeline:
         # === Stage 1: Camera trajectory ===
         logger.info("Stage 1: Camera trajectory")
         if cameras is None:
-            cameras = generate_preset_trajectory(
-                preset=self.config.camera_preset,
-                center=np.zeros(3),
-                radius=self.config.orbit_radius,
-                n_cameras=self.config.n_cameras,
-                vfov_deg=self.config.camera_vfov_deg,
-                resolution=self.config.render_resolution,
-            )
+            if self.config.camera_preset == "auto":
+                from .camera.trajectory import select_gap_cameras
+                cameras = select_gap_cameras(
+                    cloud,
+                    n_cameras=self.config.n_cameras,
+                    radius=self.config.orbit_radius,
+                    vfov_deg=self.config.camera_vfov_deg,
+                    resolution=(512, 288),
+                    device=self.config.device,
+                )
+            else:
+                cameras = generate_preset_trajectory(
+                    preset=self.config.camera_preset,
+                    center=np.zeros(3),
+                    radius=self.config.orbit_radius,
+                    n_cameras=self.config.n_cameras,
+                    vfov_deg=self.config.camera_vfov_deg,
+                    resolution=self.config.render_resolution,
+                )
         logger.info(f"  Using {len(cameras)} cameras")
 
         # === Synthesis backend (loaded once, reused across cameras) ===
