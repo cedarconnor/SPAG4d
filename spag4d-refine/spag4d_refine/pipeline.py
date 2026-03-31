@@ -264,10 +264,27 @@ class RefinePipeline:
                         synthesized=synthesized,
                         depth_vis=depth_vis,
                     )
-                    # Collect for post-seeding optimization
+                    # Collect for post-seeding optimization.
+                    # The optimization mask is WIDER than the seed mask —
+                    # dilate gap_mask with a soft transition band so the
+                    # optimizer can blend seeded Gaussians smoothly into
+                    # surrounding original geometry. Without this, there's
+                    # a hard black seam at the gap boundary.
+                    from scipy.ndimage import binary_dilation, distance_transform_edt
+                    transition_px = self.config.transition_band_pixels
+                    opt_mask_hard = binary_dilation(
+                        gap_mask, iterations=transition_px
+                    )
+                    # Soft falloff: 1.0 inside gap, fades to 0.0 over transition band
+                    dist_from_gap = distance_transform_edt(~gap_mask)
+                    opt_mask_soft = np.where(
+                        gap_mask, 1.0,
+                        np.clip(1.0 - dist_from_gap / max(transition_px, 1), 0.0, 1.0),
+                    ).astype(np.float32)
+
                     synth_targets.append(synthesized)
                     synth_cameras.append(camera)
-                    synth_masks.append(gap_mask)
+                    synth_masks.append(opt_mask_soft)
                 else:
                     logger.warning("    Synthesis skipped (no backend or no warp)")
                     continue
