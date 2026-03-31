@@ -70,9 +70,9 @@ class SPAG4D:
         self,
         input_path: Union[str, Path],
         output_path: Union[str, Path],
-        depth_min: float = 0.1,
-        depth_max: float = 100.0,
-        sky_threshold: float = 80.0,
+        depth_min: Optional[float] = None,
+        depth_max: Optional[float] = None,
+        sky_threshold: Optional[float] = None,
         stride: int = 2,
         outlier_pruning: float = 0.3,
         grazing_angle: float = 65.0,
@@ -135,6 +135,21 @@ class SPAG4D:
             depth_raw, _ = depth_engine.predict(image_tensor)
         depth = depth_raw * global_scale
         print(f"[SPAG4D] Depth estimation complete in {time.time() - t_depth:.1f}s")
+
+        # Auto-compute scene-relative defaults for any None parameters
+        depth_np = depth.cpu().numpy()
+        from .scene_analysis import compute_scene_defaults
+        scene_defaults = compute_scene_defaults(depth_np, image_height=H)
+
+        if depth_min is None:
+            depth_min = scene_defaults["depth_min"]
+        if depth_max is None:
+            depth_max = scene_defaults["depth_max"]
+        if sky_threshold is None:
+            sky_threshold = scene_defaults["sky_threshold"]
+
+        print(f"[SPAG4D] Scene defaults: depth=[{depth_min:.1f}, {depth_max:.1f}]m, "
+              f"sky={sky_threshold:.1f}m, orbit_r={scene_defaults['orbit_radius']:.2f}m")
 
         # Save depth preview if requested
         if depth_preview_path:

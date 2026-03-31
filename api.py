@@ -192,16 +192,16 @@ async def convert_panorama(
     file: UploadFile = File(...),
     depth_model: str = Query("da360", pattern="^(dap|da360)$"),
     stride: int = Query(2, ge=1, le=8),
-    depth_min: float = Query(0.1, ge=0.01),
-    depth_max: float = Query(100.0, le=1000.0),
-    sky_threshold: float = Query(80.0),
+    depth_min: Optional[float] = Query(None, ge=0.01),
+    depth_max: Optional[float] = Query(None, le=1000.0),
+    sky_threshold: Optional[float] = Query(None),
     outlier_pruning: float = Query(0.0, ge=0.0, le=1.0),
     grazing_angle: float = Query(90.0, ge=30.0, le=90.0),
     sparse_pruning: float = Query(0.0, ge=0.0, le=1.0),
     global_scale: float = Query(1.0, ge=0.1, le=10.0),
 ):
     """Convert uploaded panorama to Gaussian splat PLY."""
-    if depth_min >= depth_max:
+    if depth_min is not None and depth_max is not None and depth_min >= depth_max:
         raise HTTPException(400, f"depth_min ({depth_min}) must be less than depth_max ({depth_max}).")
 
     # Stream upload with incremental size check
@@ -400,7 +400,7 @@ async def download_file(job_id: str):
 @app.post("/api/refine")
 async def start_refinement(
     job_id: str = Query(..., description="Source conversion job ID"),
-    orbit_radius: float = Query(0.5, ge=0.05, le=5.0),
+    orbit_radius: Optional[float] = Query(None, ge=0.05, le=5.0),
     n_cameras: int = Query(8, ge=2, le=32),
     max_rounds: int = Query(2, ge=1, le=5),
     synthesis_backend: str = Query("klein-sharp"),
@@ -492,10 +492,23 @@ def _run_refinement(source_job: JobInfo, refine_job: RefineJobInfo) -> dict:
         output_dir=output_dir,
         max_refinement_rounds=params.get("max_rounds", 2),
         synthesis_backend=params.get("synthesis_backend", "klein-sharp"),
-        orbit_radius=params.get("orbit_radius", 0.5),
+        orbit_radius=params.get("orbit_radius") or 0.5,
         n_cameras=params.get("n_cameras", 8),
         camera_preset=params.get("camera_preset", "orbit"),
     )
+
+    # Auto orbit radius from scene depth if not explicitly set
+    if params.get("orbit_radius") is None:
+        try:
+            import numpy as np
+            from spag4d.scene_analysis import compute_scene_defaults
+            depth_np = np.load(str(source_job.depth_npy_path))
+            scene = compute_scene_defaults(depth_np)
+            config.orbit_radius = scene["orbit_radius"]
+            import logging
+            logging.getLogger(__name__).info(f"Auto orbit radius: {config.orbit_radius:.2f}m")
+        except Exception:
+            pass  # Keep default
 
     # Build custom cameras if provided
     custom_camera_set = None
