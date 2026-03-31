@@ -1,0 +1,20 @@
+# SPAG-4D Refinement Pipeline Dependencies
+# Requires: base requirements.txt + PyTorch with CUDA
+# Needs ~24 GB VRAM for Klein 9B inference
+
+# Klein 9B synthesis
+diffusers>=0.37.0
+transformers>=4.40.0
+accelerate>=0.30.0
+peft>=0.10.0
+
+# Gaussian splat rendering (differentiable)
+gsplat>=1.5.0
+
+# Depth estimation (DepthAnything V2)
+# (uses transformers, already listed above)
+
+# DINOv2 semantic features (loaded via torch.hub, no pip install needed)
+
+# Visualization
+matplotlib>=3.7.0

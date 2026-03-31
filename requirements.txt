@@ -28,6 +28,4 @@ termcolor>=2.0
 omegaconf>=2.3
 
 # DA360 + SHARP model dependencies
-# SHARP requires timm>=1.0.0 for timm.models.VisionTransformer
 timm>=1.0.0
-

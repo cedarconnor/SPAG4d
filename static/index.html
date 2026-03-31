@@ -109,31 +109,38 @@
                     <dd>Pixel stride for Gaussian generation. 1 = max quality, 2 = balanced (default), 4 = fast preview.</dd>
 
                     <dt>Depth Range</dt>
-                    <dd>Valid depth range in meters. Points outside this are clipped.</dd>
+                    <dd>Auto-computed from depth map statistics. Adapts to indoor (3m rooms) and outdoor (100m forests) automatically. Override with manual values if needed.</dd>
 
                     <dt>Sky Cutoff</dt>
-                    <dd>Max distance in meters. Points beyond this are removed. Use 30m for indoor scenes.</dd>
+                    <dd>Auto = 95th percentile of depth. Points beyond this are removed.</dd>
+
+                    <dt>Edge Cutoff</dt>
+                    <dd>Removes edge-on splats behind objects (grazing angle). 65° = default, removes depth discontinuity stripes. 90° = off.</dd>
 
                     <dt>Floaters Cleanup</dt>
-                    <dd>Outlier removal strength. 0 = off, higher = more aggressive.</dd>
+                    <dd>Outlier removal strength. 0.3 = default. Removes floating splats.</dd>
+
+                    <dt>Sparse Filter</dt>
+                    <dd>Removes isolated splats. 0.3 = default. Cleans up sparse regions.</dd>
 
                     <dt>Depth Scale</dt>
                     <dd>Global depth multiplier. Adjusts overall scene scale.</dd>
                 </dl>
 
                 <h3>Splat Refinement</h3>
-                <p>After conversion, use refinement to fill gaps and improve coverage. Klein 9B synthesizes novel views that seed new Gaussians in hole regions.</p>
+                <p>After conversion, use refinement to fill gaps and improve coverage. The pipeline uses Klein 9B + ml-sharp LoRA for 3D-aware synthesis, then optimizes new Gaussians with differentiable rendering (DINOv2 semantic + depth losses).</p>
                 <dl class="help-params">
                     <dt>Camera Mode</dt>
-                    <dd><strong>Orbit</strong> = horizontal ring. <strong>Orbit + Above/Below</strong> = adds elevated cameras.
-                        <strong>Full Sphere</strong> = three elevation rings for max coverage.
-                        <strong>Custom</strong> = navigate the viewer, click "Add Camera" to place your own viewpoints.</dd>
+                    <dd><strong>Auto (gap-driven)</strong> = analyzes splat from 14 candidate views, selects cameras that see the most gaps. Recommended.
+                        <strong>Orbit</strong> = fixed horizontal ring.
+                        <strong>Full Sphere</strong> = three elevation rings.
+                        <strong>Custom</strong> = place your own viewpoints.</dd>
 
                     <dt>Radius</dt>
-                    <dd>Camera distance from center (meters). Larger radius detects more gaps via parallax.</dd>
+                    <dd>Auto-computed from scene depth (5% of median). Larger radius detects more gaps via parallax. Override if needed.</dd>
 
                     <dt>Cameras</dt>
-                    <dd>Number of viewpoints. More = better coverage, slower (~6 min per camera with Klein).</dd>
+                    <dd>Number of viewpoints. More = better coverage, slower (~5 min per camera with Klein). 4-8 recommended.</dd>
 
                     <dt>Rounds</dt>
                     <dd>Refinement iterations. 1 round is usually sufficient.</dd>
@@ -145,7 +152,7 @@
                 </dl>
 
                 <div class="tip">
-                    Quick Tips: Start with Orbit, 4 cameras, 1 round for a quick test. Use Full Sphere for scenes with visible floors/ceilings. After refinement, toggle Heatmap to verify new splats are in the right places.
+                    Quick Tips: Start with Auto mode, 4 cameras, 1 round for a quick test (~20 min). Use Full Sphere for scenes with visible floors/ceilings. Toggle Heatmap after refinement to verify new splats. Edge Cutoff at 65° removes most artifacts before refinement — clean gaps refine better.
                 </div>
             </div>
 

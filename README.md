@@ -4,6 +4,8 @@ Convert 360° panoramic photos into explorable 3D Gaussian Splat scenes.
 
 SPAG-4D takes an equirectangular panorama, estimates depth with [DA360](https://github.com/Insta360-Research-Team/DA360) (default) or [DAP](https://github.com/Insta360-Research-Team/DAP), and converts it into a 3D Gaussian Splat using spherical projection. One Gaussian per pixel, colors taken directly from the source image, geometry from the depth model. Fast, accurate, no stitching artifacts.
 
+Includes an AI-powered refinement pipeline using [Klein 9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-9b) + [ml-sharp LoRA](https://huggingface.co/cyrildiagne/flux2-klein9b-lora-mlsharp-3d-repair) to detect and fill gaps with 3D-consistent content, followed by differentiable optimization with DINOv2 semantic and Pearson depth losses.
+
 <p align="center">
   <img src="assets/demo.gif" alt="SPAG-4D demo — panorama to 3D Gaussian splat" width="720">
 </p>
@@ -12,7 +14,7 @@ SPAG-4D takes an equirectangular panorama, estimates depth with [DA360](https://
 
 ## Quick Start (Windows)
 
-> Requires an NVIDIA GPU (6 GB+ VRAM), [Git](https://git-scm.com/downloads), and ~8 GB disk space. No Python or CUDA toolkit install needed -- everything is self-contained.
+> Requires an NVIDIA GPU (6 GB+ VRAM for conversion, 24 GB+ for refinement with Klein), [Git](https://git-scm.com/downloads), and ~30 GB disk space.
 
 1. Download and extract the SPAG-4D release `.zip`.
 2. Double-click **`install.bat`** and wait for "Installation Complete!"
@@ -28,10 +30,10 @@ See [INSTALL.md](INSTALL.md) for the full walkthrough and troubleshooting.
 ```
 360° equirectangular panorama
   -> DA360 depth estimation (scale-invariant, circular-padding DPT)
+  -> Scene analysis: auto-compute depth range, sky cutoff, orbit radius
   -> Spherical projection: depth * ray_direction = 3D Gaussian positions
   -> Colors sampled directly from source pixels (sRGB)
-  -> Latitude-aware Gaussian scales, normal-aligned rotations
-  -> Sky detection + pole thinning
+  -> Edge clipping, floater removal, sparse region pruning
   -> Standard PLY export
 ```
 
@@ -60,7 +62,7 @@ Upload a 360° image, adjust settings, click **Convert**, and explore the result
 ### Command Line
 
 ```bash
-# Default (DA360 depth + SPAG conversion)
+# Default (DA360 depth + SPAG conversion, auto scene defaults)
 python -m spag4d convert panorama.jpg output.ply
 
 # Max quality (one Gaussian per pixel)
@@ -72,9 +74,6 @@ python -m spag4d convert panorama.jpg output.ply --stride 4
 # Use DAP depth model instead of DA360
 python -m spag4d convert panorama.jpg output.ply --depth-model dap
 
-# Batch convert a folder
-python -m spag4d convert input_dir/ output_dir/ --batch
-
 # Pre-download all model weights
 python -m spag4d download-models
 ```
@@ -85,11 +84,14 @@ python -m spag4d download-models
 from spag4d import SPAG4D
 
 converter = SPAG4D(device="cuda")
+
+# Auto scene defaults (depth range, sky cutoff computed from depth map)
 result = converter.convert("panorama.jpg", "output.ply", stride=2)
 
-# DAP depth model
-converter = SPAG4D(device="cuda", depth_model="dap")
-result = converter.convert("panorama.jpg", "output_dap.ply")
+# Manual overrides
+result = converter.convert("panorama.jpg", "output.ply",
+    depth_min=0.5, depth_max=50.0, sky_threshold=30.0,
+    grazing_angle=65.0)
 
 print(f"{result.splat_count:,} Gaussians in {result.processing_time:.1f}s")
 ```
@@ -100,21 +102,24 @@ print(f"{result.splat_count:,} Gaussians in {result.processing_time:.1f}s")
 
 After conversion, SPAG-4D can refine the Gaussian splat by detecting and filling gaps using AI synthesis. The refinement pipeline:
 
-1. **Renders** the splat from multiple camera viewpoints around the scene
-2. **Detects gaps** by comparing rendered views against the original panorama
-3. **Synthesizes** repaired views using Klein 9B + ml-sharp LoRA
-4. **Seeds** new Gaussians in gap regions from the synthesized depth
-5. **Validates** new Gaussians across multiple views and prunes bad ones
+1. **Analyzes** the splat from candidate viewpoints to find where gaps exist (gap-driven camera selection)
+2. **Renders** the splat from selected cameras and compares against parallax-corrected panoramic projections
+3. **Classifies** each pixel as Trusted, Degraded (TYPE_A), or Gap (TYPE_C)
+4. **Synthesizes** repaired views using Klein 9B + ml-sharp LoRA with 6DoF camera-aware prompting
+5. **Seeds** new Gaussians in gap regions using monocular depth estimation + affine alignment
+6. **Validates** new Gaussians via multi-view visibility and color consistency checks
+7. **Optimizes** seeded Gaussians using differentiable gsplat rendering with masked L1, DINOv2 semantic, and Pearson depth losses
+8. **Prunes** low-quality and inconsistent Gaussians
 
 ### Camera Modes
 
 | Mode | Description |
 |------|-------------|
-| **Orbit** | Horizontal camera ring at scene center |
-| **Orbit + Above** | Half horizontal + half elevated at 30° |
-| **Orbit + Below** | Half horizontal + half lowered at -20° |
+| **Auto (gap-driven)** | Renders the splat from 14 candidate viewpoints, selects cameras that see the most gaps. Default and recommended. |
+| **Orbit** | Fixed horizontal camera ring at scene center |
+| **Orbit + Above/Below** | Horizontal + elevated/lowered cameras |
 | **Full Sphere** | Three rings (0°, +30°, -20°) for maximum coverage |
-| **Custom** | Navigate the 3D viewer and click "Add Camera" to place viewpoints manually |
+| **Custom** | Navigate the 3D viewer and click "Capture Viewpoint" to place cameras manually |
 
 ### Provenance Heatmap
 
@@ -124,32 +129,36 @@ After refinement, click the **Heatmap** button to color-code Gaussians by origin
 - **Green** = Promoted (new, validated across multiple views)
 - **Yellow** = Seeded (new, candidate for promotion)
 
-This lets you verify that refinement is adding splats in the right places.
-
 ### Refinement Settings
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Camera Mode | Orbit | Camera placement strategy |
-| Radius | 0.5 | Camera distance from center (meters) |
-| Cameras | 8 | Number of viewpoints (~6 min each with Klein) |
-| Rounds | 1 | Refinement iterations |
+| Camera Mode | Auto | Camera placement strategy (Auto analyzes splat for gaps) |
+| Radius | Auto | Camera distance from center (auto-computed from scene depth) |
+| Cameras | 8 | Number of viewpoints (~5 min each with Klein 9B) |
+| Rounds | 1 | Refinement iterations (1 is usually sufficient) |
 
-> **Note:** Refinement requires `diffusers>=0.37.0` and the Klein 9B model weights (~18 GB). These are installed by `install.bat` and downloaded automatically on first use.
+> **Requirements:** Refinement needs `diffusers>=0.37.0`, `transformers`, `gsplat>=1.5`, and ~24 GB VRAM. Klein 9B model weights (~18 GB) download automatically on first use. The ml-sharp LoRA (~260 MB) downloads from Hugging Face.
 
 ---
 
 ## Settings
 
+### Conversion Parameters
+
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `depth_model` | `da360` | Depth model: `da360` (recommended) or `dap` (metric depth) |
 | `stride` | `2` | Pixel stride: `1`=full density, `2`=quarter, `4`=sixteenth |
-| `depth_min` | `0.1` | Clip geometry closer than this (meters) |
-| `depth_max` | `100.0` | Clip geometry farther than this (meters) |
-| `sky_threshold` | `80.0` | Depth cutoff for sky removal (0 = keep everything) |
-| `outlier_pruning` | `0.0` | Statistical outlier removal (0 = off, 1 = aggressive) |
+| `depth_min` | Auto | Clip geometry closer than this (meters). Auto = 1st percentile of depth. |
+| `depth_max` | Auto | Clip geometry farther than this (meters). Auto = 99th percentile. |
+| `sky_threshold` | Auto | Depth cutoff for sky removal. Auto = 95th percentile. |
+| `grazing_angle` | `65` | Remove edge-on splats behind objects. 90=off, 65=default, 50=aggressive. |
+| `outlier_pruning` | `0.3` | Floater removal strength. 0=off, 1=aggressive. |
+| `sparse_pruning` | `0.3` | Remove isolated splats. 0=off, 1=aggressive. |
 | `global_scale` | `1.0` | Multiply all depths by this factor |
+
+Parameters marked "Auto" are computed from the depth map's statistical distribution, adapting to both indoor (3m rooms) and outdoor (100m forests) scenes without manual tuning. You can override any auto value by setting it explicitly.
 
 ### Stride Guide
 
@@ -166,7 +175,7 @@ This lets you verify that refinement is adding splats in the right places.
 
 | Model | Default | Description |
 |-------|---------|-------------|
-| **DA360** | Yes | Depth Anything V2 with circular-padding DPT decoder. Seamless 360° depth with no boundary artifacts. Produces superior results in most scenes. |
+| **DA360** | Yes | Depth Anything V2 with circular-padding DPT decoder. Seamless 360° depth with no boundary artifacts. Superior results in most scenes. |
 | **DAP** | No | Depth Any Panorama. Outputs metric radial depth. Alternative option. |
 
 Both models download weights automatically on first use (~1.3-1.5 GB each).
@@ -188,10 +197,12 @@ git clone https://github.com/Insta360-Research-Team/DA360 spag4d/da360_arch/DA36
 
 # DAP depth model
 git submodule update --init --recursive
-# Or: git clone https://github.com/Insta360-Research-Team/DAP spag4d/dap_arch/DAP
 
 # Download model weights
 python -m spag4d download-models
+
+# For refinement (optional, requires 24GB+ VRAM):
+pip install -r requirements-refine.txt
 ```
 
 ---
@@ -200,12 +211,13 @@ python -m spag4d download-models
 
 ```
 spag4d/                          # Core conversion pipeline
-├── core.py                      # Pipeline orchestrator
+├── core.py                      # Pipeline orchestrator (auto scene defaults)
+├── scene_analysis.py            # Scale-relative parameter computation
 ├── spag_converter.py            # Depth-to-Gaussian spherical projection
 ├── dap_model.py                 # DAP depth estimation
 ├── da360_model.py               # DA360 depth estimation (default)
 ├── ply_writer.py                # PLY export (sRGB SH0 encoding)
-├── scene_filter.py              # Sky detection, pole thinning, outlier pruning
+├── scene_filter.py              # Edge clipping, outlier pruning, sparse filtering
 ├── spherical_grid.py            # 360° coordinate math
 └── cli.py                       # CLI commands
 
@@ -213,18 +225,19 @@ spag4d-refine/                   # Refinement pipeline (gap filling)
 ├── spag4d_refine/
 │   ├── pipeline.py              # Multi-stage refinement orchestrator
 │   ├── config.py                # All refinement parameters
-│   ├── camera/                  # Camera trajectory & panoramic extraction
+│   ├── camera/                  # Gap-driven camera selection, panoramic extraction
 │   ├── gaussian/                # GaussianCloud with provenance tracking
-│   ├── regions/                 # Gap region classification
+│   ├── regions/                 # Three-way gap region classification
 │   ├── renderer/                # gsplat rendering + diagnostics
-│   ├── seeding/                 # New Gaussian creation from synthesis
-│   ├── synthesis/               # Klein 9B + ml-sharp LoRA inpainting
+│   ├── seeding/                 # Shadow Gaussian creation + multi-view validation
+│   ├── synthesis/               # Klein 9B + ml-sharp LoRA (with fused QKV splitting)
+│   ├── optimization/            # Masked gsplat optimization (L1 + DINOv2 + depth)
 │   └── validation/              # PSNR checks, pruning, metrics
 └── tests/
 
 api.py                           # FastAPI web server + refine endpoints
 static/
-├── index.html
+├── index.html                   # Web UI with inline help
 ├── css/style.css
 └── js/
     ├── viewer.js                # GaussianSplats3D wrapper
@@ -237,13 +250,20 @@ static/
 |---------|----------|
 | `No module named 'spag4d.dap_arch.DAP.networks'` | `git submodule update --init --recursive` |
 | DA360 not found | `git clone https://github.com/Insta360-Research-Team/DA360 spag4d/da360_arch/DA360` |
-| CUDA out of memory | Use `--stride 4` or lower input image resolution |
+| CUDA out of memory (conversion) | Use `--stride 4` or lower input image resolution |
+| CUDA out of memory (refinement) | Klein 9B needs ~24 GB VRAM. Reduce cameras or use `--synthesis-backend sdxl` |
+| gsplat LNK1104 error on Windows | Delete `%LOCALAPPDATA%\torch_extensions\...\gsplat_cuda` and restart |
 | Port 7860 in use | Edit `run.bat` and change the port |
+| Scene defaults look wrong | Override with explicit `depth_min`, `depth_max`, `sky_threshold` values |
 
 ## References
 
 - [DA360 -- Depth Anything in 360](https://github.com/Insta360-Research-Team/DA360)
 - [DAP -- Depth Any Panorama](https://github.com/Insta360-Research-Team/DAP)
+- [Klein 9B -- FLUX.2 Image Editing](https://huggingface.co/black-forest-labs/FLUX.2-klein-9b)
+- [ml-sharp 3D Repair LoRA](https://huggingface.co/cyrildiagne/flux2-klein9b-lora-mlsharp-3d-repair)
+- [DINOv2 -- Self-supervised Vision Transformer](https://github.com/facebookresearch/dinov2)
+- [gsplat -- Gaussian Splatting Library](https://github.com/nerfstudio-project/gsplat)
 - [GaussianSplats3D](https://github.com/mkkellogg/GaussianSplats3D)
 - [3D Gaussian Splatting](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/)
 
