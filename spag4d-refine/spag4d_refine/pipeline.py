@@ -185,7 +185,10 @@ class RefinePipeline:
                     )
 
                     from .regions.classifier import RegionType
-                    gap_mask = (region_map == RegionType.TYPE_C) | (region_map == RegionType.TYPE_A)
+                    # Only seed truly transparent gaps (TYPE_C), NOT degraded
+                    # geometry (TYPE_A). TYPE_A already has Gaussians — adding
+                    # more on top overwrites good areas and causes shifts.
+                    gap_mask = region_map == RegionType.TYPE_C
 
                     if not gap_mask.any():
                         logger.info("    No gaps detected, skipping")

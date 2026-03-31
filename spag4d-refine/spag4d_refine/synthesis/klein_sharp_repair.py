@@ -379,10 +379,17 @@ class KleinSharpRepairer:
                 "the scene in image 2. Repair the perspective and missing areas."
             )
 
+        # Klein accepts multiple conditioning images. ml-sharp LoRA was
+        # trained on 2 images, but Klein base handles additional context.
+        # Image 1: Reference (parallax-correct forward warp + pano fill)
+        # Image 2: Broken splat render (with gaps to repair)
+        # Image 3: Depth disparity visualization (spatial context)
         images = [
             self._to_pil(inputs.forward_warped_rgb, size=(1024, 1024)),
             self._to_pil(inputs.broken_splat_render, size=(1024, 1024)),
         ]
+        if inputs.depth_disparity_vis is not None:
+            images.append(self._to_pil(inputs.depth_disparity_vis, size=(1024, 1024)))
         logger.info(f"Prompt: {prompt[:80]}...")
 
         result = self._pipeline(
