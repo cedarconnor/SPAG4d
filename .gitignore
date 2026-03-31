@@ -3,6 +3,9 @@
 venv/
 env/
 
+# Generated outputs (conversion + refinement jobs)
+output/
+
 # Python
 __pycache__/
 *.py[cod]

@@ -29,8 +29,9 @@ from spag4d import SPAG4D, ConversionResult
 # ─────────────────────────────────────────────────────────────────
 # Configuration
 # ─────────────────────────────────────────────────────────────────
-import tempfile
-TEMP_DIR = Path(tempfile.gettempdir()) / "spag4d"
+# Store outputs in project directory (survives temp cleanup and reboots)
+OUTPUT_ROOT = Path(__file__).resolve().parent / "output"
+TEMP_DIR = OUTPUT_ROOT / "jobs"
 JOB_TTL_SECONDS = 30 * 60  # 30 minutes
 MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
 GPU_SEMAPHORE_LIMIT = 1
