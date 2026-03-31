@@ -27,6 +27,8 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+.pytest_cache/
+.ruff_cache/
 
 # IDE
 .idea/
@@ -34,104 +36,77 @@ wheels/
 *.swp
 *.swo
 
-# Temp files
-temp_spag4d/
-*.tmp
-*.temp
-
-# Logs
-# Logs
-*.log
-server_log.txt
-
-# Model weights (large files)
-*.pth
-*.pt
-*.ckpt
-*.safetensors
-
-# Output files
-*.ply
-*.splat
-
-# Internal docs (not for distribution)
-SPAG-4D-Tool-v2.md
-CLAUDE.md
-DESIGN.md
-DEPTH_ALIGNMENT_PLAN.md
-
 # OS
 .DS_Store
 Thumbs.db
 
-# Test outputs
-test_outputs/
+# Logs
+*.log
+server_log.txt
 
-# Design Docs
-design_doc.md
-SHARP_INTEGRATION_DESIGN.md
+# Model weights (large files, downloaded at install)
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+models/
+checkpoints/
 
-# Dependencies (Local)
-ml-sharp/
-
-# Debug & Scratch Scripts
-debug_*.py
-debug_*.txt
-test_debug.py
-test_exports.py
-test_output.zip
-
-# Generated Test Outputs
-TestImage/video_test_output/
-TestImage/frame_*.ply
-
-# Review Docs
-SHARP_IMPLEMENTATION_REVIEW.md
-SHARP_INTEGRATION_REVIEW.md
-
-# Cloned model repos (not submodules)
-spag4d/panda_arch/PanDA/
-spag4d/da360_arch/DA360/
-
-# Test results
-test_results*.txt
-
-# Build outputs
-dist/
-
-# Release archives
-*.zip
-SPAG4D_Release.zip
-python_embed/
-
-# Old/archived files
-OLD/
-
-# Unnecessary build/test files
-build_release.bat
-test.html
-test_improvements.py
-test_out.txt
-test_panorama_8k.png
-test_panda_tiles.ply
-QUALITY_IMPROVEMENTS.md
-SPAG4D_Quality_Architecture.md
-implementation_plan.md
-pytest_output.txt
+# Output files
+*.ply
+*.splat
 
 # Root-level test/debug scripts (not in tests/)
 test_*.py
 test_*.ply
 test_*.splat
 test_*.png
+test_*.npy
+debug_*.py
+debug_*.txt
+
+# Test output directories
+test_refine_output/
+test_pipeline_output/
+refine_test_output/
+final_quality_test/
+test_outputs/
+TestPLY/
 
 # Error/debug logs
 *_err.log
-curl_err.log
-dap_error.log
-fastapi_err.log
 
-# Removed v1 modules (shouldn't be tracked)
+# Internal docs (not for distribution)
+CLAUDE.md
+DESIGN.md
+spag4d-refinement-implementation-v6.md
+
+# Old/archived files
+OLD/
+
+# Release archives
+*.zip
+build_release.bat
+make_release.py
+
+# Embedded Python (distribution only)
+python_embed/
+
+# Cloned model repos (not submodules)
+spag4d/panda_arch/PanDA/
+spag4d/da360_arch/DA360/
+
+# Dependencies (Local)
+ml-sharp/
+
+# Removed v1 submodule
+src/
+
+# Large binary test data
+TestImage/*.npy
+TestImage/cobblestone_street_night_8k.jpg
+
+# Removed v1 modules
 spag4d/panda_model.py
 spag4d/da3_model.py
 spag4d/visual_odometry.py
@@ -148,18 +123,7 @@ static/js/pano-viewer.js
 static/js/splat-viewer.js
 static/js/three.min.js
 
-# Removed v1 submodule
-src/
-
-# Large binary test data
-TestImage/*.npy
-TestImage/cobblestone_street_night_8k.jpg
-
-# Downloaded models (50GB+)
-models/
-
-# Refinement test outputs
-refine_test_output/
-
-# Refinement implementation spec (internal)
-spag4d-refinement-implementation-v6.md
+# Temp files
+temp_spag4d/
+*.tmp
+*.temp
