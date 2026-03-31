@@ -79,6 +79,8 @@ class RefineConfig:
     promotion_consistency_threshold: float = 0.3
     confidence_decay_pixels: int = 50
     min_seed_confidence: float = 0.3
+    color_consistency_threshold: float = 0.15
+    hallucination_opacity: float = 0.3
 
     # --- Fine-tuning ---
     finetune_iterations: int = 4000
