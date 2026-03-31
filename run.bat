@@ -6,10 +6,14 @@ echo   SPAG-4D Launcher
 echo ========================================
 echo.
 
-set "PYTHON_EXE=python_embed\python.exe"
-
-if not exist "%PYTHON_EXE%" (
-    echo [ERROR] Embedded Python not found.
+REM Prefer .venv Python (has pre-compiled gsplat CUDA kernels for refinement)
+REM Falls back to python_embed if .venv doesn't exist
+if exist ".venv\Scripts\python.exe" (
+    set "PYTHON_EXE=.venv\Scripts\python.exe"
+) else if exist "python_embed\python.exe" (
+    set "PYTHON_EXE=python_embed\python.exe"
+) else (
+    echo [ERROR] No Python found. Need .venv or python_embed.
     echo Please run 'install.bat' first!
     pause
     exit /b 1
