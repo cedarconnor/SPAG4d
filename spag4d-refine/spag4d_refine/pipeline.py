@@ -297,6 +297,9 @@ class RefinePipeline:
             cloud = validate_shadow_gaussians(
                 cloud, list(cameras),
                 consistency_threshold=self.config.promotion_consistency_threshold,
+                synthesized_images=synth_targets if synth_targets else None,
+                color_consistency_threshold=self.config.color_consistency_threshold,
+                hallucination_opacity=self.config.hallucination_opacity,
             )
             gaussians_promoted = int(np.sum(
                 cloud.provenance == GaussianSource.PROMOTED
