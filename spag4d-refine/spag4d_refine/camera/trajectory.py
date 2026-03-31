@@ -75,6 +75,102 @@ def generate_orbit_trajectory(
     return CameraSet(cameras)
 
 
+def select_gap_cameras(
+    cloud: "GaussianCloud",
+    n_cameras: int = 4,
+    radius: float = 0.5,
+    n_candidates: int = 14,
+    vfov_deg: float = 60.0,
+    resolution: tuple[int, int] = (512, 288),
+    alpha_threshold: float = 0.95,
+    device: str = "cuda",
+) -> CameraSet:
+    """
+    Select cameras that see the most gaps in the Gaussian splat.
+
+    Renders the splat from candidate viewpoints distributed around the
+    scene, ranks them by gap coverage, and returns the top N.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    # Generate candidate cameras via Fibonacci sphere sampling
+    candidates = []
+    golden_ratio = (1 + 5 ** 0.5) / 2
+    for i in range(n_candidates):
+        theta = 2 * np.pi * i / golden_ratio
+        phi = np.arccos(1 - 2 * (i + 0.5) / n_candidates)
+
+        x = radius * np.sin(phi) * np.cos(theta)
+        y = radius * np.cos(phi)
+        z = radius * np.sin(phi) * np.sin(theta)
+
+        eye = np.array([x, y, z])
+        cam = PinholeCamera.look_at(
+            eye=eye,
+            target=np.zeros(3),
+            up=np.array([0.0, 1.0, 0.0]),
+            vfov_deg=vfov_deg,
+            width=resolution[0],
+            height=resolution[1],
+        )
+        candidates.append(cam)
+
+    # Render each candidate and measure gap coverage
+    from ..renderer.gsplat_renderer import GsplatRenderer
+    renderer = GsplatRenderer(cloud, device=device)
+
+    gap_scores = []
+    for i, cam in enumerate(candidates):
+        result = renderer.render(cam)
+        gap_fraction = float((result.alpha < alpha_threshold).mean())
+        gap_scores.append((i, gap_fraction, cam))
+
+    gap_scores.sort(key=lambda x: x[1], reverse=True)
+
+    min_gap = 0.01
+    viable = [(i, score, cam) for i, score, cam in gap_scores if score >= min_gap]
+
+    if not viable:
+        logger.info(f"  No gaps found in {n_candidates} candidates, using default orbit")
+        return generate_orbit_trajectory(
+            center=np.zeros(3), radius=radius,
+            n_cameras=n_cameras, vfov_deg=vfov_deg,
+            resolution=resolution,
+        )
+
+    # Merge nearby candidates (within 30 degrees)
+    selected = []
+    for i, score, cam in viable:
+        if len(selected) >= n_cameras:
+            break
+        pos = cam.c2w[:3, 3]
+        too_close = False
+        for _, _, sel_cam in selected:
+            sel_pos = sel_cam.c2w[:3, 3]
+            cos_angle = np.dot(pos, sel_pos) / (
+                np.linalg.norm(pos) * np.linalg.norm(sel_pos) + 1e-8
+            )
+            if cos_angle > np.cos(np.radians(30)):
+                too_close = True
+                break
+        if not too_close:
+            selected.append((i, score, cam))
+
+    if len(selected) < n_cameras:
+        for i, score, cam in viable:
+            if len(selected) >= n_cameras:
+                break
+            if not any(s[0] == i for s in selected):
+                selected.append((i, score, cam))
+
+    cams = [cam for _, _, cam in selected]
+    for i, (idx, score, cam) in enumerate(selected):
+        logger.info(f"  Camera {i+1}: {score:.1%} gaps (candidate #{idx})")
+
+    return CameraSet(cams)
+
+
 def generate_preset_trajectory(
     preset: str = "orbit",
     center: np.ndarray = np.zeros(3),
