@@ -506,8 +506,7 @@ def _run_refinement(source_job: JobInfo, refine_job: RefineJobInfo) -> dict:
             depth_np = np.load(str(source_job.depth_npy_path))
             scene = compute_scene_defaults(depth_np)
             config.orbit_radius = scene["orbit_radius"]
-            import logging
-            logging.getLogger(__name__).info(f"Auto orbit radius: {config.orbit_radius:.2f}m")
+            print(f"[refine] Auto orbit radius: {config.orbit_radius:.2f}m")
         except Exception:
             pass  # Keep default
 
