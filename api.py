@@ -546,10 +546,20 @@ def _run_refinement(source_job: JobInfo, refine_job: RefineJobInfo) -> dict:
 
     # Copy final PLY and heatmap to expected locations
     import shutil
-    if result.output_path.exists():
+    logger = logging.getLogger("spag4d.refine")
+    logger.info(f"Pipeline output: {result.output_path}")
+    logger.info(f"Expected copy target: {refine_job.output_ply_path}")
+    if result.output_path and result.output_path.exists():
+        refine_job.output_ply_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(result.output_path, refine_job.output_ply_path)
+        logger.info(f"Copied refined PLY ({refine_job.output_ply_path.stat().st_size:,} bytes)")
+    else:
+        logger.error(f"Refined PLY not found at {result.output_path}")
     if result.heatmap_path and result.heatmap_path.exists():
         shutil.copy2(result.heatmap_path, refine_job.heatmap_ply_path)
+        logger.info(f"Copied heatmap PLY")
+    else:
+        logger.warning(f"Heatmap PLY not found at {result.heatmap_path}")
 
     return {
         "original_count": result.original_gaussian_count,
