@@ -57,13 +57,13 @@ checkpoints/
 *.splat
 
 # Root-level test/debug scripts (not in tests/)
-test_*.py
-test_*.ply
-test_*.splat
-test_*.png
-test_*.npy
-debug_*.py
-debug_*.txt
+/test_*.py
+/test_*.ply
+/test_*.splat
+/test_*.png
+/test_*.npy
+/debug_*.py
+/debug_*.txt
 
 # Test output directories
 test_refine_output/
