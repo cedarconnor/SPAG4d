@@ -37,6 +37,12 @@ def main():
 @click.option('--device', default='cuda', help='Device: cuda, cpu, mps')
 @click.option('--quiet', is_flag=True, help='Suppress progress output')
 @click.option('--mock-dap', is_flag=True, help='Use mock DAP model (for testing)')
+@click.option('--refine', is_flag=True, default=False,
+              help='Run GSFix3D disocclusion repair after conversion')
+@click.option('--refine-iterations', default=3, type=int,
+              help='Max refinement iterations (default: 3)')
+@click.option('--refine-cameras', default=36, type=int,
+              help='Novel-view cameras for hole detection (default: 36)')
 def convert(
     input_path: str,
     output_path: str,
@@ -55,6 +61,9 @@ def convert(
     device: str,
     quiet: bool,
     mock_dap: bool,
+    refine: bool,
+    refine_iterations: int,
+    refine_cameras: int,
 ):
     """
     Convert equirectangular panorama to Gaussian splat PLY.
@@ -124,6 +133,34 @@ def convert(
             click.echo(f"File size: {result.file_size / 1024 / 1024:.2f} MB")
             click.echo(f"Time: {result.processing_time:.2f}s")
             click.echo(f"Depth range: {result.depth_range[0]:.2f}m - {result.depth_range[1]:.2f}m")
+
+        if refine:
+            if not quiet:
+                click.echo("Running GSFix3D refinement...")
+
+            from .refine import refine_splat
+            import numpy as np
+
+            depth_npy_path = str(output_path).replace('.ply', '_depth.npy')
+            if not Path(depth_npy_path).exists():
+                click.echo("Warning: depth .npy not found, skipping refinement", err=True)
+            else:
+                depth_map = np.load(depth_npy_path)
+                refined_path = str(output_path).replace('.ply', '_refined.ply')
+
+                refine_result = refine_splat(
+                    ply_path=str(output_path),
+                    panorama_path=str(input_path),
+                    depth_map=depth_map,
+                    max_iterations=refine_iterations,
+                    num_cameras=refine_cameras,
+                    output_path=refined_path,
+                )
+
+                if not quiet:
+                    click.echo(f"Refined: holes {refine_result['initial_hole_fraction']:.2%}"
+                               f" -> {refine_result['final_hole_fraction']:.2%}")
+                    click.echo(f"Saved to: {refined_path}")
 
 
 @main.command('download-models')
