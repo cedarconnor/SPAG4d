@@ -8,7 +8,7 @@ class RefineConfig:
     """All hyperparameters for the GSFix3D refinement pipeline."""
 
     # --- Paths ---
-    gsfixer_checkpoint: str = "pretrained/gsfix3d/gsfix3d_base.ckpt"
+    gsfixer_checkpoint: str = "pretrained/gsfix3d"
 
     # --- Phase 1: Camera Rig ---
     camera_fov: float = 60.0
