@@ -145,9 +145,9 @@ def refine_splat(
             gaussians=gaussians, repaired_images=repaired,
             cameras=repair_cams, hole_masks=repair_masks,
             original_images=cubemap_faces, original_cameras=cubemap_cameras,
-            num_iterations=config.distill_iterations,
-            densify_interval=config.densify_interval,
             densify_grad_threshold=config.densify_grad_threshold,
+            iters_per_view=20,   # Match refine_gs.py
+            kf_iters=50,         # Match refine_gs.py (conservative)
         )
 
         tag_gaussian_provenance(gaussians, initial_gaussian_count)

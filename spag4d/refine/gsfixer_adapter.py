@@ -254,8 +254,12 @@ class GSFixerAdapter:
                 )
                 result = gs_img.copy()
 
-            # Composite: keep original where no holes, repaired where holes.
-            mask_3d = mask[..., None]
+            # Soft composite: feather the mask boundary to avoid hard seams.
+            # Gaussian blur the binary mask to create a soft transition.
+            from scipy.ndimage import gaussian_filter
+            soft_mask = gaussian_filter(mask.astype(np.float64), sigma=5.0)
+            soft_mask = np.clip(soft_mask, 0, 1).astype(np.float32)
+            mask_3d = soft_mask[..., None]
             composited = gs_img * (1.0 - mask_3d) + result * mask_3d
             repaired.append(composited.astype(np.float32))
 
