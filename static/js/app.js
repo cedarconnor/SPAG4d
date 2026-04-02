@@ -12,10 +12,7 @@ class SPAG4DApp {
         this.depthUrl = null;
         this.currentRefineId = null;
         this.refinePollInterval = null;
-        this.customCameras = [];
-        this.heatmapUrl = null;
         this.refinedPlyUrl = null;
-        this.showingHeatmap = false;
         this.init();
     }
 
@@ -98,28 +95,6 @@ class SPAG4DApp {
         const downloadRefinedBtn = document.getElementById('download-refined-btn');
         if (downloadRefinedBtn) {
             downloadRefinedBtn.addEventListener('click', () => this.downloadRefinedFile());
-        }
-
-        // Camera preset toggle
-        const presetSelect = document.getElementById('camera-preset');
-        if (presetSelect) {
-            presetSelect.addEventListener('change', () => this.toggleCameraPreset());
-        }
-
-        // Custom camera controls
-        const addCamBtn = document.getElementById('add-camera-btn');
-        if (addCamBtn) {
-            addCamBtn.addEventListener('click', () => this.addCustomCamera());
-        }
-        const clearCamBtn = document.getElementById('clear-cameras-btn');
-        if (clearCamBtn) {
-            clearCamBtn.addEventListener('click', () => this.clearCustomCameras());
-        }
-
-        // Heatmap toggle
-        const heatmapBtn = document.getElementById('toggle-heatmap-btn');
-        if (heatmapBtn) {
-            heatmapBtn.addEventListener('click', () => this.toggleHeatmap());
         }
 
         // Diagnostics gallery
@@ -387,23 +362,16 @@ class SPAG4DApp {
         const refineBtn = document.getElementById('refine-btn');
         if (refineBtn) refineBtn.disabled = true;
 
-        const preset = document.getElementById('camera-preset')?.value || 'orbit';
         const params = new URLSearchParams({
             job_id: this.currentJobId,
-            orbit_radius: document.getElementById('orbit-radius')?.value || '0.5',
-            n_cameras: document.getElementById('n-cameras')?.value || '8',
-            max_rounds: document.getElementById('max-rounds')?.value || '1',
-            synthesis_backend: 'klein-sharp',
-            camera_preset: preset,
+            num_cameras: document.getElementById('num-cameras')?.value || '36',
+            max_rounds: document.getElementById('max-rounds')?.value || '3',
+            finetune_steps: document.getElementById('finetune-steps')?.value || '500',
         });
-        if (preset === 'custom' && this.customCameras.length > 0) {
-            params.set('custom_cameras', JSON.stringify(this.customCameras));
-        }
 
         const refineStatus = document.getElementById('refine-status');
         if (refineStatus) refineStatus.style.display = '';
         this.setRefineStatus('Starting refinement...', 0);
-        // Enable diagnostics button during refinement
         const diagBtn = document.getElementById('show-diagnostics-btn');
         if (diagBtn) diagBtn.disabled = false;
 
@@ -430,38 +398,42 @@ class SPAG4DApp {
     async checkRefineStatus() {
         if (!this.currentRefineId) return;
 
+        const stageLabels = {
+            'camera_rig': 'Generating cameras',
+            'mesh_extract': 'Extracting mesh',
+            'finetune': 'Adapting to scene',
+            'render_holes': 'Detecting holes',
+            'gsfixer_inference': 'Repairing holes',
+            'distill': 'Optimizing 3D',
+        };
+
         try {
             const response = await fetch(`/api/refine/status/${this.currentRefineId}`);
             if (!response.ok) throw new Error('Status check failed');
             const status = await response.json();
 
             if (status.status === 'processing') {
-                const label = status.stage ? `Round ${status.round} - ${status.stage}` : `Round ${status.round}`;
+                const stageName = stageLabels[status.stage] || status.stage || 'Processing';
+                const label = status.round > 0
+                    ? `Round ${status.round} — ${stageName}`
+                    : stageName;
                 this.setRefineStatus(label, status.progress_pct);
             } else if (status.status === 'complete') {
                 clearInterval(this.refinePollInterval);
                 this.refinePollInterval = null;
                 this.setRefineStatus('Refinement complete!', 100);
 
-                // Store URLs for heatmap toggle
                 this.refinedPlyUrl = status.ply_url || null;
-                this.heatmapUrl = status.heatmap_url || null;
-                this.showingHeatmap = false;
 
-                // Load refined PLY into viewer
                 if (status.ply_url) {
                     this.ensureViewer();
                     this.viewer.loadScene(status.ply_url);
                 }
 
-                // Show metrics
                 if (status.metrics) this.showRefineMetrics(status.metrics);
 
-                // Enable buttons
                 const dlBtn = document.getElementById('download-refined-btn');
                 if (dlBtn) dlBtn.disabled = false;
-                const heatmapBtn = document.getElementById('toggle-heatmap-btn');
-                if (heatmapBtn) heatmapBtn.disabled = !this.heatmapUrl;
 
                 const refineBtn = document.getElementById('refine-btn');
                 if (refineBtn) refineBtn.disabled = false;
@@ -491,69 +463,16 @@ class SPAG4DApp {
         container.style.display = '';
 
         const items = [
-            { label: 'Added', value: metrics.gaussians_added?.toLocaleString() || '0' },
-            { label: 'Pruned', value: metrics.gaussians_pruned?.toLocaleString() || '0' },
-            { label: 'Final Count', value: metrics.final_count?.toLocaleString() || '—' },
-            { label: 'Rounds', value: metrics.rounds_completed || '—' },
+            { label: 'Holes Before', value: metrics.initial_hole_fraction != null ? `${(metrics.initial_hole_fraction * 100).toFixed(1)}%` : '—' },
+            { label: 'Holes After', value: metrics.final_hole_fraction != null ? `${(metrics.final_hole_fraction * 100).toFixed(1)}%` : '—' },
+            { label: 'Gaussians', value: metrics.final_count?.toLocaleString() || '—' },
+            { label: 'Rounds', value: metrics.iterations_used || '—' },
             { label: 'Time', value: metrics.total_time ? `${metrics.total_time}s` : '—' },
-            { label: 'Backend', value: metrics.synthesis_backend || '—' },
         ];
 
         container.innerHTML = items.map(m =>
             `<div class="metric-card"><div class="metric-value">${m.value}</div><div class="metric-label">${m.label}</div></div>`
         ).join('');
-    }
-
-    // ── Camera Presets ──
-
-    toggleCameraPreset() {
-        const preset = document.getElementById('camera-preset')?.value;
-        const presetParams = document.getElementById('preset-params');
-        const customControls = document.getElementById('custom-camera-controls');
-        if (preset === 'custom') {
-            if (presetParams) presetParams.style.display = 'none';
-            if (customControls) customControls.style.display = '';
-        } else {
-            if (presetParams) presetParams.style.display = '';
-            if (customControls) customControls.style.display = 'none';
-        }
-    }
-
-    addCustomCamera() {
-        if (!this.viewer || !this.viewer.viewer) return;
-        const cam = this.viewer.viewer.camera;
-        const controls = this.viewer.viewer.controls;
-        const target = controls ? controls.target : { x: 0, y: 0, z: 0 };
-
-        this.customCameras.push({
-            position: [cam.position.x, cam.position.y, cam.position.z],
-            target: [target.x, target.y, target.z],
-            up: [cam.up.x, cam.up.y, cam.up.z],
-        });
-
-        const countEl = document.getElementById('custom-camera-count');
-        if (countEl) countEl.textContent = `${this.customCameras.length} camera${this.customCameras.length !== 1 ? 's' : ''}`;
-    }
-
-    clearCustomCameras() {
-        this.customCameras = [];
-        const countEl = document.getElementById('custom-camera-count');
-        if (countEl) countEl.textContent = '0 cameras';
-    }
-
-    // ── Heatmap Toggle ──
-
-    toggleHeatmap() {
-        if (!this.heatmapUrl || !this.refinedPlyUrl) return;
-        this.showingHeatmap = !this.showingHeatmap;
-        const url = this.showingHeatmap ? this.heatmapUrl : this.refinedPlyUrl;
-        this.ensureViewer();
-        this.viewer.loadScene(url);
-
-        const btn = document.getElementById('toggle-heatmap-btn');
-        if (btn) btn.classList.toggle('active', this.showingHeatmap);
-        const legend = document.getElementById('heatmap-legend');
-        if (legend) legend.style.display = this.showingHeatmap ? '' : 'none';
     }
 
     // ── Diagnostics Gallery ──

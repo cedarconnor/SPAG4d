@@ -94,8 +94,7 @@
                     <li><strong>Adjust</strong> parameters below (defaults work well for most scenes)</li>
                     <li><strong>Convert</strong> — runs depth estimation + SPAG conversion (~1-2s)</li>
                     <li><strong>Preview</strong> in the 3D viewer: left-click orbit, right-click pan, scroll zoom</li>
-                    <li><strong>Refine</strong> (optional) — AI gap filling with Klein 9B synthesis</li>
-                    <li><strong>Heatmap</strong> — toggle to see which splats are new vs original</li>
+                    <li><strong>Refine</strong> (optional) — GSFix3D disocclusion repair</li>
                     <li><strong>Download</strong> as PLY for Blender, SuperSplat, or any 3DGS viewer</li>
                 </ol>
 
@@ -127,32 +126,21 @@
                     <dd>Global depth multiplier. Adjusts overall scene scale.</dd>
                 </dl>
 
-                <h3>Splat Refinement</h3>
-                <p>After conversion, use refinement to fill gaps and improve coverage. The pipeline uses Klein 9B + ml-sharp LoRA for 3D-aware synthesis, then optimizes new Gaussians with differentiable rendering (DINOv2 semantic + depth losses).</p>
+                <h3>Splat Refinement (GSFix3D)</h3>
+                <p>After conversion, use refinement to fill disocclusion holes. The pipeline generates novel-view cameras, detects holes via alpha thresholding, repairs them with a scene-adapted diffusion model (GSFix3D), then optimizes the 3DGS via differentiable rendering.</p>
                 <dl class="help-params">
-                    <dt>Camera Mode</dt>
-                    <dd><strong>Auto (gap-driven)</strong> = analyzes splat from 14 candidate views, selects cameras that see the most gaps. Recommended.
-                        <strong>Orbit</strong> = fixed horizontal ring.
-                        <strong>Full Sphere</strong> = three elevation rings.
-                        <strong>Custom</strong> = place your own viewpoints.</dd>
-
-                    <dt>Radius</dt>
-                    <dd>Auto-computed from scene depth (5% of median). Larger radius detects more gaps via parallax. Override if needed.</dd>
-
                     <dt>Cameras</dt>
-                    <dd>Number of viewpoints. More = better coverage, slower (~5 min per camera with Klein). 4-8 recommended.</dd>
+                    <dd>Number of novel-view cameras. 36 = 12 directions x 3 depths. More cameras detect more holes but take longer.</dd>
 
                     <dt>Rounds</dt>
-                    <dd>Refinement iterations. 1 round is usually sufficient.</dd>
+                    <dd>Refinement iterations. Each round re-renders, finds remaining holes, and repairs them. Stops early when holes &lt; 2%.</dd>
 
-                    <dt>Heatmap Toggle</dt>
-                    <dd>After refinement, click Heatmap to color-code splats by origin.
-                        <strong>Blue</strong> = original, <strong>Green</strong> = promoted (validated new),
-                        <strong>Yellow</strong> = seeded (candidate).</dd>
+                    <dt>Finetune Steps</dt>
+                    <dd>GSFixer scene adaptation. 500 steps (~5 min) teaches the model this scene's appearance before repairing holes.</dd>
                 </dl>
 
                 <div class="tip">
-                    Quick Tips: Start with Auto mode, 4 cameras, 1 round for a quick test (~20 min). Use Full Sphere for scenes with visible floors/ceilings. Toggle Heatmap after refinement to verify new splats. Edge Cutoff at 65° removes most artifacts before refinement — clean gaps refine better.
+                    Quick Tips: Start with 36 cameras and 1 round for a quick test. The pipeline auto-detects which cameras have significant holes and only repairs those. Use 3 rounds for thorough coverage.
                 </div>
             </div>
 
@@ -252,14 +240,10 @@
             <!-- Refinement Controls -->
             <div id="refine-panel" class="controls-panel" style="display: none;">
                 <div class="actions-row">
-                    <span class="section-label">Splat Refinement</span>
+                    <span class="section-label">Splat Refinement (GSFix3D)</span>
                     <button id="refine-btn" class="action-btn" disabled>
                         <span class="btn-icon">🔧</span>
                         Refine
-                    </button>
-                    <button id="toggle-heatmap-btn" class="action-btn" disabled title="Toggle provenance heatmap">
-                        <span class="btn-icon">🎨</span>
-                        Heatmap
                     </button>
                     <button id="download-refined-btn" class="action-btn" disabled>
                         <span class="btn-icon">💾</span>
@@ -267,51 +251,30 @@
                     </button>
                 </div>
                 <div class="params-row">
-                    <div class="param-group" title="How cameras are placed around the scene. Orbit = horizontal ring, Full Sphere = 3 rings at different heights, Custom = place your own cameras in the 3D viewer">
-                        <label for="camera-preset">Camera Mode</label>
-                        <select id="camera-preset">
-                            <option value="auto" selected>Auto (gap-driven)</option>
-                            <option value="orbit">Orbit</option>
-                            <option value="orbit_above">Orbit + Above</option>
-                            <option value="orbit_below">Orbit + Below</option>
-                            <option value="full_sphere">Full Sphere</option>
-                            <option value="custom">Custom</option>
+                    <div class="param-group" title="Number of novel-view cameras for hole detection. More = better coverage, slower.">
+                        <label for="num-cameras">Cameras</label>
+                        <select id="num-cameras">
+                            <option value="12">12</option>
+                            <option value="24">24</option>
+                            <option value="36" selected>36</option>
+                            <option value="48">48</option>
                         </select>
                     </div>
-                    <div id="preset-params" class="param-group-row">
-                        <div class="param-group" title="Distance of cameras from scene center in meters. Larger = more parallax for gap detection">
-                            <label for="orbit-radius">Radius (m)</label>
-                            <input type="number" id="orbit-radius" value="0.5" min="0.05" max="5" step="0.05">
-                        </div>
-                        <div class="param-group" title="Number of camera viewpoints. More cameras = better coverage but longer processing (~6 min each)">
-                            <label for="n-cameras">Cameras</label>
-                            <select id="n-cameras">
-                                <option value="4">4</option>
-                                <option value="8" selected>8</option>
-                                <option value="12">12</option>
-                                <option value="16">16</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div id="custom-camera-controls" style="display: none;">
-                        <button id="add-camera-btn" class="sm-btn" title="Capture current viewpoint">+ Add Camera</button>
-                        <span id="custom-camera-count" class="camera-count">0 cameras</span>
-                        <button id="clear-cameras-btn" class="sm-btn" title="Remove all custom cameras">Clear</button>
-                    </div>
-                    <div class="param-group" title="Number of refinement iterations. Each round seeds new Gaussians in gaps and prunes bad ones. 1 is usually enough">
+                    <div class="param-group" title="Number of refinement iterations. Each round detects remaining holes and repairs them.">
                         <label for="max-rounds">Rounds</label>
                         <select id="max-rounds">
-                            <option value="1" selected>1</option>
+                            <option value="1">1</option>
                             <option value="2">2</option>
-                            <option value="3">3</option>
+                            <option value="3" selected>3</option>
                         </select>
                     </div>
-                </div>
-                <!-- Heatmap legend -->
-                <div id="heatmap-legend" class="heatmap-legend" style="display: none;">
-                    <span class="legend-item"><span class="dot blue"></span> Original</span>
-                    <span class="legend-item"><span class="dot green"></span> Promoted</span>
-                    <span class="legend-item"><span class="dot yellow"></span> Seeded</span>
+                    <details class="param-group advanced-params">
+                        <summary>Advanced</summary>
+                        <div class="param-group" title="GSFixer scene adaptation steps. More = better quality, slower (~1min per 100 steps).">
+                            <label for="finetune-steps">Finetune Steps</label>
+                            <input type="number" id="finetune-steps" value="500" min="100" max="2000" step="100">
+                        </div>
+                    </details>
                 </div>
                 <!-- Refinement progress -->
                 <div id="refine-status" class="refine-status" style="display: none;">
