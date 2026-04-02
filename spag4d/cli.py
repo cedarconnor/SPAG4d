@@ -127,7 +127,7 @@ def convert(
 
 
 @main.command('download-models')
-@click.option('--model', type=click.Choice(['dap', 'da360', 'all']),
+@click.option('--model', type=click.Choice(['dap', 'da360', 'gsfix3d', 'all']),
               default='all', help='Which model weights to download')
 @click.option('--verify', is_flag=True, help='Verify downloaded weights')
 def download_models(model: str, verify: bool):
@@ -159,6 +159,22 @@ def download_models(model: str, verify: bool):
         except Exception as e:
             click.echo(f"DA360 download failed: {e}", err=True)
             if model == 'da360':
+                raise click.Abort()
+
+    if model in ('gsfix3d', 'all'):
+        click.echo("Downloading GSFix3D checkpoint...")
+        try:
+            from huggingface_hub import snapshot_download
+            path = snapshot_download(
+                "goldoak1421/gsfixer-full-replica-room1",
+                local_dir="pretrained/gsfix3d",
+            )
+            click.echo(f"GSFix3D checkpoint cached at: {path}")
+        except ImportError:
+            click.echo("huggingface_hub not installed. Install with: pip install huggingface-hub", err=True)
+        except Exception as e:
+            click.echo(f"GSFix3D download failed: {e}", err=True)
+            if model == 'gsfix3d':
                 raise click.Abort()
 
 
