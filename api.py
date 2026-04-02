@@ -68,14 +68,13 @@ class RefineJobInfo:
     def __init__(self, refine_id: str, source_job_id: str):
         self.refine_id = refine_id
         self.source_job_id = source_job_id
-        self.status = "queued"  # queued, processing, complete, error
+        self.status = "queued"
         self.created_at = time.time()
         self.last_updated = time.time()
         self.round_number = 0
         self.stage = ""
         self.progress_pct = 0
         self.output_ply_path: Optional[Path] = None
-        self.heatmap_ply_path: Optional[Path] = None
         self.diagnostics_dir: Optional[Path] = None
         self.metrics: dict = {}
         self.error: Optional[str] = None
@@ -401,14 +400,11 @@ async def download_file(job_id: str):
 @app.post("/api/refine")
 async def start_refinement(
     job_id: str = Query(..., description="Source conversion job ID"),
-    orbit_radius: Optional[float] = Query(None, ge=0.05, le=5.0),
-    n_cameras: int = Query(8, ge=2, le=32),
-    max_rounds: int = Query(2, ge=1, le=5),
-    synthesis_backend: str = Query("klein-sharp"),
-    camera_preset: str = Query("orbit"),
-    custom_cameras: Optional[str] = Query(None, description="JSON array of custom camera poses"),
+    max_rounds: int = Query(3, ge=1, le=5),
+    num_cameras: int = Query(36, ge=6, le=72),
+    finetune_steps: int = Query(500, ge=100, le=2000),
 ):
-    """Start refinement on an existing conversion job."""
+    """Start GSFix3D refinement on an existing conversion job."""
     if job_id not in jobs:
         raise HTTPException(404, "Source job not found")
 
@@ -416,7 +412,6 @@ async def start_refinement(
     if job.status != "complete":
         raise HTTPException(400, "Source job not complete")
 
-    # Verify all artifacts exist
     if not (job.output_ply_path and job.output_ply_path.exists()):
         raise HTTPException(400, "PLY file not found")
     if not (job.input_path and job.input_path.exists()):
@@ -427,15 +422,11 @@ async def start_refinement(
     refine_id = str(uuid.uuid4())
     refine_job = RefineJobInfo(refine_id, job_id)
     refine_job.params = {
-        "orbit_radius": orbit_radius,
-        "n_cameras": n_cameras,
         "max_rounds": max_rounds,
-        "synthesis_backend": synthesis_backend,
-        "camera_preset": camera_preset,
-        "custom_cameras": custom_cameras,
+        "num_cameras": num_cameras,
+        "finetune_steps": finetune_steps,
     }
     refine_job.output_ply_path = TEMP_DIR / f"{refine_id}_refined.ply"
-    refine_job.heatmap_ply_path = TEMP_DIR / f"{refine_id}_heatmap.ply"
     refine_job.diagnostics_dir = TEMP_DIR / f"{refine_id}_diagnostics"
     refine_jobs[refine_id] = refine_job
 
@@ -473,63 +464,15 @@ async def process_refinement(refine_job: RefineJobInfo, source_job: JobInfo):
 
 
 def _run_refinement(source_job: JobInfo, refine_job: RefineJobInfo) -> dict:
-    """Execute the refinement pipeline (blocking, runs in thread)."""
-    import sys
-    _refine_path = str(Path(__file__).resolve().parent / "spag4d-refine")
-    if _refine_path not in sys.path:
-        sys.path.insert(0, _refine_path)
-
-    from spag4d_refine.config import RefineConfig
-    from spag4d_refine.pipeline import RefinePipeline
+    """Execute the GSFix3D refinement pipeline (blocking, runs in thread)."""
+    import numpy as np
+    from spag4d.refine import refine_splat
 
     params = refine_job.params
     output_dir = refine_job.diagnostics_dir or TEMP_DIR / f"{refine_job.refine_id}_out"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    config = RefineConfig(
-        splat_path=source_job.output_ply_path,
-        panorama_rgb_path=source_job.input_path,
-        panorama_depth_path=source_job.depth_npy_path,
-        output_dir=output_dir,
-        max_refinement_rounds=params.get("max_rounds", 2),
-        synthesis_backend=params.get("synthesis_backend", "klein-sharp"),
-        orbit_radius=params.get("orbit_radius") or 0.5,
-        n_cameras=params.get("n_cameras", 8),
-        camera_preset=params.get("camera_preset", "orbit"),
-    )
-
-    # Auto orbit radius from scene depth if not explicitly set
-    if params.get("orbit_radius") is None:
-        try:
-            import numpy as np
-            from spag4d.scene_analysis import compute_scene_defaults
-            depth_np = np.load(str(source_job.depth_npy_path))
-            scene = compute_scene_defaults(depth_np)
-            config.orbit_radius = scene["orbit_radius"]
-            print(f"[refine] Auto orbit radius: {config.orbit_radius:.2f}m")
-        except Exception:
-            pass  # Keep default
-
-    # Build custom cameras if provided
-    custom_camera_set = None
-    custom_cameras_json = params.get("custom_cameras")
-    if params.get("camera_preset") == "custom" and custom_cameras_json:
-        import json as json_mod
-        from spag4d_refine.camera.pinhole import PinholeCamera, CameraSet
-        import numpy as np
-        poses = json_mod.loads(custom_cameras_json)
-        cams = []
-        for p in poses:
-            cam = PinholeCamera.look_at(
-                eye=np.array(p["position"]),
-                target=np.array(p["target"]),
-                up=np.array(p.get("up", [0, 1, 0])),
-                vfov_deg=config.camera_vfov_deg,
-                width=config.render_resolution[0],
-                height=config.render_resolution[1],
-            )
-            cams.append(cam)
-        custom_camera_set = CameraSet(cams)
+    depth_map = np.load(str(source_job.depth_npy_path))
 
     def update_progress(round_num, stage, pct):
         refine_job.round_number = round_num
@@ -537,48 +480,24 @@ def _run_refinement(source_job: JobInfo, refine_job: RefineJobInfo) -> dict:
         refine_job.progress_pct = pct
         refine_job.last_updated = time.time()
 
-    pipeline = RefinePipeline(config)
-    result = pipeline.run(
+    result = refine_splat(
+        ply_path=str(source_job.output_ply_path),
+        panorama_path=str(source_job.input_path),
+        depth_map=depth_map,
+        max_iterations=params.get("max_rounds", 3),
+        num_cameras=params.get("num_cameras", 36),
+        finetune_steps=params.get("finetune_steps", 500),
+        output_path=str(refine_job.output_ply_path),
         progress_callback=update_progress,
-        cameras=custom_camera_set,
+        diagnostics_dir=str(output_dir / "diagnostics"),
     )
 
-    # Copy final PLY and heatmap to expected locations
-    import shutil
-    logger = logging.getLogger("spag4d.refine")
-    logger.info(f"Pipeline output: {result.output_path}")
-    logger.info(f"Expected copy target: {refine_job.output_ply_path}")
-    if result.output_path and result.output_path.exists():
-        refine_job.output_ply_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(result.output_path, refine_job.output_ply_path)
-        logger.info(f"Copied refined PLY ({refine_job.output_ply_path.stat().st_size:,} bytes)")
-    else:
-        logger.error(f"Refined PLY not found at {result.output_path}")
-    if result.heatmap_path and result.heatmap_path.exists():
-        shutil.copy2(result.heatmap_path, refine_job.heatmap_ply_path)
-        logger.info(f"Copied heatmap PLY")
-    else:
-        logger.warning(f"Heatmap PLY not found at {result.heatmap_path}")
-
     return {
-        "original_count": result.original_gaussian_count,
-        "final_count": result.final_gaussian_count,
-        "gaussians_added": result.gaussians_added,
-        "gaussians_pruned": result.gaussians_pruned,
-        "rounds_completed": result.rounds_completed,
-        "total_time": round(result.total_elapsed_seconds, 1),
-        "synthesis_backend": result.synthesis_backend_used,
-        "round_stats": [
-            {
-                "round": s.round_number,
-                "seeded": s.gaussians_seeded,
-                "promoted": s.gaussians_promoted,
-                "pruned": s.gaussians_pruned,
-                "psnr": round(s.original_psnr, 2),
-                "time": round(s.elapsed_seconds, 1),
-            }
-            for s in result.round_stats
-        ],
+        "initial_hole_fraction": result["initial_hole_fraction"],
+        "final_hole_fraction": result["final_hole_fraction"],
+        "final_count": result["gaussians_count"],
+        "iterations_used": result["iterations_used"],
+        "total_time": result["total_time"],
     }
 
 
@@ -597,7 +516,6 @@ async def get_refine_status(refine_id: str):
         "progress_pct": rj.progress_pct,
     }
 
-    # Diagnostics available during processing and after completion
     if rj.diagnostics_dir and rj.diagnostics_dir.exists():
         response["diagnostics_url"] = f"/api/refine/diagnostics/{refine_id}"
 
@@ -605,8 +523,6 @@ async def get_refine_status(refine_id: str):
         response["metrics"] = rj.metrics
         if rj.output_ply_path and rj.output_ply_path.exists():
             response["ply_url"] = f"/api/refine/download/{refine_id}"
-        if rj.heatmap_ply_path and rj.heatmap_ply_path.exists():
-            response["heatmap_url"] = f"/api/refine/heatmap/{refine_id}"
 
     if rj.status == "error":
         response["error"] = rj.error
@@ -631,21 +547,6 @@ async def download_refined_ply(refine_id: str):
         rj.output_ply_path,
         media_type="application/octet-stream",
         filename=f"refined_{refine_id[:8]}.ply",
-    )
-
-
-@app.get("/api/refine/heatmap/{refine_id}")
-async def download_heatmap_ply(refine_id: str):
-    """Download provenance heatmap PLY file."""
-    if refine_id not in refine_jobs:
-        raise HTTPException(404, "Refinement job not found")
-    rj = refine_jobs[refine_id]
-    if not rj.heatmap_ply_path or not rj.heatmap_ply_path.exists():
-        raise HTTPException(404, "Heatmap PLY not found")
-    return FileResponse(
-        rj.heatmap_ply_path,
-        media_type="application/octet-stream",
-        filename=f"heatmap_{refine_id[:8]}.ply",
     )
 
 

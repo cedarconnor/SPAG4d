@@ -4,7 +4,7 @@ Convert 360° panoramic photos into explorable 3D Gaussian Splat scenes.
 
 SPAG-4D takes an equirectangular panorama, estimates depth with [DA360](https://github.com/Insta360-Research-Team/DA360) (default) or [DAP](https://github.com/Insta360-Research-Team/DAP), and converts it into a 3D Gaussian Splat using spherical projection. One Gaussian per pixel, colors taken directly from the source image, geometry from the depth model. Fast, accurate, no stitching artifacts.
 
-Includes an AI-powered refinement pipeline using [Klein 9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-9b) + [ml-sharp LoRA](https://huggingface.co/cyrildiagne/flux2-klein9b-lora-mlsharp-3d-repair) to detect and fill gaps with 3D-consistent content, followed by differentiable optimization with DINOv2 semantic and Pearson depth losses.
+Includes a disocclusion repair pipeline powered by [GSFix3D](https://github.com/mobileroboticslab/GSFix3D) that detects holes from novel viewpoints, repairs them with a scene-adapted diffusion model, and optimizes the 3D Gaussians via differentiable rendering.
 
 <p align="center">
   <img src="assets/demo.gif" alt="SPAG-4D demo — panorama to 3D Gaussian splat" width="720">
@@ -14,7 +14,7 @@ Includes an AI-powered refinement pipeline using [Klein 9B](https://huggingface.
 
 ## Quick Start (Windows)
 
-> Requires an NVIDIA GPU (6 GB+ VRAM for conversion, 24 GB+ for refinement with Klein), [Git](https://git-scm.com/downloads), and ~30 GB disk space.
+> Requires an NVIDIA GPU (6 GB+ VRAM for conversion, 16 GB+ for refinement), [Git](https://git-scm.com/downloads), and ~30 GB disk space.
 
 1. Download and extract the SPAG-4D release `.zip`.
 2. Double-click **`install.bat`** and wait for "Installation Complete!"
@@ -74,7 +74,10 @@ python -m spag4d convert panorama.jpg output.ply --stride 4
 # Use DAP depth model instead of DA360
 python -m spag4d convert panorama.jpg output.ply --depth-model dap
 
-# Pre-download all model weights
+# Convert + fill disocclusion holes with GSFix3D
+python -m spag4d convert panorama.jpg output.ply --refine
+
+# Pre-download all model weights (including GSFix3D checkpoint)
 python -m spag4d download-models
 ```
 
@@ -98,47 +101,40 @@ print(f"{result.splat_count:,} Gaussians in {result.processing_time:.1f}s")
 
 ---
 
-## Splat Refinement
+## Disocclusion Repair (Refinement)
 
-After conversion, SPAG-4D can refine the Gaussian splat by detecting and filling gaps using AI synthesis. The refinement pipeline:
+Single-viewpoint panoramas produce 3D Gaussians with structural holes — areas behind foreground objects and at depth discontinuities that the original camera never observed. SPAG-4D's refinement pipeline fills these using [GSFix3D](https://github.com/mobileroboticslab/GSFix3D):
 
-1. **Analyzes** the splat from candidate viewpoints to find where gaps exist (gap-driven camera selection)
-2. **Renders** the splat from selected cameras and compares against parallax-corrected panoramic projections
-3. **Classifies** each pixel as Trusted, Degraded (TYPE_A), or Gap (TYPE_C)
-4. **Synthesizes** repaired views using Klein 9B + ml-sharp LoRA with 6DoF camera-aware prompting
-5. **Seeds** new Gaussians in gap regions using monocular depth estimation + affine alignment
-6. **Validates** new Gaussians via multi-view visibility and color consistency checks
-7. **Optimizes** seeded Gaussians using differentiable gsplat rendering with masked L1, DINOv2 semantic, and Pearson depth losses
-8. **Prunes** low-quality and inconsistent Gaussians
+**Phase 1 — Camera Rig & Hole Detection**
+Novel-view cameras are placed around the scene at multiple distances. Each renders the Gaussian splat and detects holes (black regions where no Gaussians project). Cameras with the most holes are selected for repair.
 
-### Camera Modes
+**Phase 2 — GSFixer Diffusion Repair**
+A pretrained diffusion model (GSFixer) is fine-tuned on cubemap views extracted from the source panorama to learn the scene's visual style. It then inpaints the hole regions in each selected view, producing 2D repaired images that are consistent with the surrounding 3D content.
 
-| Mode | Description |
-|------|-------------|
-| **Auto (gap-driven)** | Renders the splat from 14 candidate viewpoints, selects cameras that see the most gaps. Default and recommended. |
-| **Orbit** | Fixed horizontal camera ring at scene center |
-| **Orbit + Above/Below** | Horizontal + elevated/lowered cameras |
-| **Full Sphere** | Three rings (0°, +30°, -20°) for maximum coverage |
-| **Custom** | Navigate the 3D viewer and click "Capture Viewpoint" to place cameras manually |
+**Phase 3 — 3DGS Distillation**
+The repaired images are distilled back into the 3D Gaussians via differentiable rendering. New Gaussians are densified in hole regions, then the full set is optimized with L1 + SSIM loss against both repaired views and original cubemap anchors. Original Gaussians receive reduced gradient scaling (0.1x) to prevent drift.
 
-### Provenance Heatmap
+The pipeline iterates until hole coverage drops below a convergence threshold (default 2%).
 
-After refinement, click the **Heatmap** button to color-code Gaussians by origin:
+### CLI Usage
 
-- **Blue** = Original (from initial conversion)
-- **Green** = Promoted (new, validated across multiple views)
-- **Yellow** = Seeded (new, candidate for promotion)
+```bash
+# Convert with refinement
+python -m spag4d convert panorama.jpg output.ply --refine
+
+# Control refinement iterations and camera count
+python -m spag4d convert panorama.jpg output.ply --refine --refine-iterations 3 --refine-cameras 36
+```
 
 ### Refinement Settings
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Camera Mode | Auto | Camera placement strategy (Auto analyzes splat for gaps) |
-| Radius | Auto | Camera distance from center (auto-computed from scene depth) |
-| Cameras | 8 | Number of viewpoints (~5 min each with Klein 9B) |
-| Rounds | 1 | Refinement iterations (1 is usually sufficient) |
+| `--refine` | off | Enable GSFix3D disocclusion repair after conversion |
+| `--refine-iterations` | 3 | Maximum repair-distill cycles |
+| `--refine-cameras` | 36 | Novel-view cameras for hole detection |
 
-> **Requirements:** Refinement needs `diffusers>=0.37.0`, `transformers`, `gsplat>=1.5`, and ~24 GB VRAM. Klein 9B model weights (~18 GB) download automatically on first use. The ml-sharp LoRA (~260 MB) downloads from Hugging Face.
+> **Requirements:** Refinement needs `diffusers`, `transformers`, `open3d`, `trimesh`, `scipy`, and ~16 GB VRAM. GSFix3D checkpoint (~2 GB) downloads from Hugging Face on first use via `python -m spag4d download-models --model gsfix3d`.
 
 ---
 
@@ -201,8 +197,9 @@ git submodule update --init --recursive
 # Download model weights
 python -m spag4d download-models
 
-# For refinement (optional, requires 24GB+ VRAM):
-pip install -r requirements-refine.txt
+# For refinement (optional, requires 16GB+ VRAM):
+pip install diffusers transformers open3d trimesh scipy
+python -m spag4d download-models --model gsfix3d
 ```
 
 ---
@@ -221,19 +218,15 @@ spag4d/                          # Core conversion pipeline
 ├── spherical_grid.py            # 360° coordinate math
 └── cli.py                       # CLI commands
 
-spag4d-refine/                   # Refinement pipeline (gap filling)
-├── spag4d_refine/
-│   ├── pipeline.py              # Multi-stage refinement orchestrator
-│   ├── config.py                # All refinement parameters
-│   ├── camera/                  # Gap-driven camera selection, panoramic extraction
-│   ├── gaussian/                # GaussianCloud with provenance tracking
-│   ├── regions/                 # Three-way gap region classification
-│   ├── renderer/                # gsplat rendering + diagnostics
-│   ├── seeding/                 # Shadow Gaussian creation + multi-view validation
-│   ├── synthesis/               # Klein 9B + ml-sharp LoRA (with fused QKV splitting)
-│   ├── optimization/            # Masked gsplat optimization (L1 + DINOv2 + depth)
-│   └── validation/              # PSNR checks, pruning, metrics
-└── tests/
+spag4d/refine/                   # GSFix3D disocclusion repair
+├── pipeline.py                  # 3-phase refinement orchestrator
+├── config.py                    # All refinement hyperparameters
+├── camera_rig.py                # Novel-view camera generation + cubemap extraction
+├── gsfixer_adapter.py           # GSFixer diffusion model (fine-tune + inference)
+├── mesh_extract.py              # Poisson mesh for dual conditioning
+├── distill.py                   # Differentiable 3DGS optimization (L1 + SSIM)
+├── format_compat.py             # PLY round-trip between SPAG-4D and GSFix3D
+└── provenance.py                # Original vs. new Gaussian tracking
 
 api.py                           # FastAPI web server + refine endpoints
 static/
@@ -251,8 +244,7 @@ static/
 | `No module named 'spag4d.dap_arch.DAP.networks'` | `git submodule update --init --recursive` |
 | DA360 not found | `git clone https://github.com/Insta360-Research-Team/DA360 spag4d/da360_arch/DA360` |
 | CUDA out of memory (conversion) | Use `--stride 4` or lower input image resolution |
-| CUDA out of memory (refinement) | Klein 9B needs ~24 GB VRAM. Reduce cameras or use `--synthesis-backend sdxl` |
-| gsplat LNK1104 error on Windows | Delete `%LOCALAPPDATA%\torch_extensions\...\gsplat_cuda` and restart |
+| CUDA out of memory (refinement) | GSFix3D needs ~16 GB VRAM. Reduce `--refine-cameras` or lower render resolution |
 | Port 7860 in use | Edit `run.bat` and change the port |
 | Scene defaults look wrong | Override with explicit `depth_min`, `depth_max`, `sky_threshold` values |
 
@@ -260,10 +252,7 @@ static/
 
 - [DA360 -- Depth Anything in 360](https://github.com/Insta360-Research-Team/DA360)
 - [DAP -- Depth Any Panorama](https://github.com/Insta360-Research-Team/DAP)
-- [Klein 9B -- FLUX.2 Image Editing](https://huggingface.co/black-forest-labs/FLUX.2-klein-9b)
-- [ml-sharp 3D Repair LoRA](https://huggingface.co/cyrildiagne/flux2-klein9b-lora-mlsharp-3d-repair)
-- [DINOv2 -- Self-supervised Vision Transformer](https://github.com/facebookresearch/dinov2)
-- [gsplat -- Gaussian Splatting Library](https://github.com/nerfstudio-project/gsplat)
+- [GSFix3D -- Diffusion-Guided Novel View Repair](https://github.com/mobileroboticslab/GSFix3D)
 - [GaussianSplats3D](https://github.com/mkkellogg/GaussianSplats3D)
 - [3D Gaussian Splatting](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/)
 
