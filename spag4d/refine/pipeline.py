@@ -1,7 +1,6 @@
 """Top-level refinement pipeline orchestrator."""
 import logging
 import time
-import shutil
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -90,6 +89,11 @@ def refine_splat(
     report("render_holes", 30)
     gaussians = load_gaussians_from_ply(ply_path, device="cuda")
 
+    # Track initial count for provenance
+    initial_gaussian_count = 0
+    if gaussians is not None and hasattr(gaussians, 'get_xyz'):
+        initial_gaussian_count = gaussians.get_xyz.shape[0]
+
     initial_hole_frac = None
     avg_hole_frac = 0.0
     iteration = 0
@@ -146,26 +150,31 @@ def refine_splat(
             densify_grad_threshold=config.densify_grad_threshold,
         )
 
-        tag_gaussian_provenance(gaussians, 0)
+        tag_gaussian_provenance(gaussians, initial_gaussian_count)
 
     gsfixer.unload()
 
-    # Export
+    # Export refined PLY
     output_path = output_path or ply_path.replace('.ply', '_refined.ply')
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    # STUB: copy original PLY as "refined" until real implementation
-    if not Path(output_path).exists():
-        shutil.copy2(ply_path, output_path)
     save_gaussians_to_ply(gaussians, output_path)
 
     report("distill", 100, config.max_iterations)
 
+    gaussian_count = 0
+    if gaussians is not None and hasattr(gaussians, 'get_xyz'):
+        gaussian_count = gaussians.get_xyz.shape[0]
+
     total_time = time.time() - start_time
+    logger.info(f"[refine] Done in {total_time:.1f}s. "
+                f"Holes: {initial_hole_frac:.4f} -> {avg_hole_frac:.4f}, "
+                f"Gaussians: {gaussian_count}")
+
     return {
         "refined_ply_path": output_path,
         "initial_hole_fraction": initial_hole_frac or 0.0,
         "final_hole_fraction": avg_hole_frac,
-        "gaussians_count": 0,
+        "gaussians_count": gaussian_count,
         "iterations_used": min(iteration + 1, config.max_iterations),
         "total_time": round(total_time, 1),
     }
