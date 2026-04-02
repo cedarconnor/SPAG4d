@@ -29,13 +29,14 @@ class RefineConfig:
     mesh_simplify_ratio: float = 0.1
 
     # --- Phase 3: Distillation ---
+    # Values matched to GSFix3D reference (arguments.py OptimizationParams)
     distill_iterations: int = 3000
     densify_interval: int = 100
-    densify_grad_threshold: float = 0.0002
-    lr_position: float = 0.00016
+    densify_grad_threshold: float = 0.005
+    lr_position: float = 0.00032
     lr_feature: float = 0.0025
-    lr_opacity: float = 0.05
-    lr_scaling: float = 0.005
+    lr_opacity: float = 0.025
+    lr_scaling: float = 0.002
     lr_rotation: float = 0.001
     original_view_ratio: float = 0.3
 

@@ -17,13 +17,16 @@ def extract_conditioning_mesh(depth_map, panorama, simplify_ratio=0.1):
 
     h, w = depth_map.shape
 
-    theta = np.linspace(0, 2 * np.pi, w, endpoint=False)
-    phi = np.linspace(np.pi / 2, -np.pi / 2, h)
+    # SPAG convention (spherical_grid.py): θ decreases left-to-right,
+    # φ is colatitude 0 (north pole) to π (south pole).
+    # rhat = [sin(φ)*cos(θ), cos(φ), -sin(φ)*sin(θ)]
+    theta = (1.0 - np.linspace(0, 1, w, endpoint=False)) * 2 * np.pi
+    phi = np.linspace(0, np.pi, h)
     theta_grid, phi_grid = np.meshgrid(theta, phi)
 
-    x = depth_map * np.cos(phi_grid) * np.sin(theta_grid)
-    y = depth_map * np.sin(phi_grid)
-    z = -depth_map * np.cos(phi_grid) * np.cos(theta_grid)
+    x = depth_map * np.sin(phi_grid) * np.cos(theta_grid)
+    y = depth_map * np.cos(phi_grid)
+    z = -depth_map * np.sin(phi_grid) * np.sin(theta_grid)
 
     stride = max(1, min(h, w) // 64)
     xs = x[::stride, ::stride].flatten()

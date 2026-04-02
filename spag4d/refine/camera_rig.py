@@ -188,9 +188,11 @@ def extract_cubemap_views(panorama, depth_map, face_size=512):
         right /= np.linalg.norm(right)
         up = np.cross(right, forward)  # re-orthogonalise
 
-        # Build per-pixel ray directions on a 90-deg FOV grid
+        # Build per-pixel ray directions on a 90-deg FOV grid.
+        # v is top-to-bottom = +up to -up (matching OpenCV camera convention
+        # where row 0 looks UP in world space, row N-1 looks DOWN).
         u = np.linspace(-1.0, 1.0, face_size)
-        v = np.linspace(-1.0, 1.0, face_size)
+        v = np.linspace(1.0, -1.0, face_size)
         uu, vv = np.meshgrid(u, v)  # (face_size, face_size)
 
         # Each pixel's direction = forward + u*right + v*up (un-normalised)
@@ -200,12 +202,17 @@ def extract_cubemap_views(panorama, depth_map, face_size=512):
         dirs /= np.linalg.norm(dirs, axis=-1, keepdims=True)
 
         # Convert 3D direction -> equirectangular pixel coordinates
-        # theta: azimuth (longitude), phi: elevation (latitude)
-        theta = np.arctan2(dirs[..., 0], -dirs[..., 2])   # [-pi, pi]
-        phi = np.arcsin(np.clip(dirs[..., 1], -1.0, 1.0))  # [-pi/2, pi/2]
+        # Must match SPAG's spherical_grid.py convention:
+        #   θ = atan2(-Z, X),  mapped to [0, 2π]
+        #   φ = acos(Y),       mapped to [0, π]
+        #   pixel_x = (1 - θ/(2π)) * (w - 1)
+        #   pixel_y = φ/π * (h - 1)
+        theta_spag = np.arctan2(-dirs[..., 2], dirs[..., 0])  # [-pi, pi]
+        theta_spag = theta_spag % (2 * np.pi)                 # [0, 2pi]
+        phi_spag = np.arccos(np.clip(dirs[..., 1], -1.0, 1.0))  # [0, pi]
 
-        px = ((theta / np.pi + 1.0) / 2.0) * (w - 1)       # [0, w-1]
-        py = (0.5 - phi / np.pi) * (h - 1)                  # [0, h-1]
+        px = (1.0 - theta_spag / (2 * np.pi)) * (w - 1)      # [0, w-1]
+        py = phi_spag / np.pi * (h - 1)                       # [0, h-1]
 
         # Bilinear sample each channel (mode='wrap' handles horizontal seam)
         face = np.zeros((face_size, face_size, 3), dtype=np.float32)
