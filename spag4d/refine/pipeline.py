@@ -50,6 +50,8 @@ def refine_splat(
     # Load panorama
     from PIL import Image
     panorama = np.array(Image.open(panorama_path)).astype(np.float32) / 255.0
+    if panorama.ndim == 3 and panorama.shape[2] == 4:
+        panorama = panorama[:, :, :3]
 
     report("camera_rig", 5)
 
