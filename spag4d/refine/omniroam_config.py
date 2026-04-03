@@ -9,12 +9,12 @@ class OmniRoamConfig:
 
     # ── Execution environment ──
     enabled: bool = False
-    install_dir: str = "/home/user/OmniRoam"  # WSL path
+    install_dir: str = "/home/cedarconnor/OmniRoam"  # WSL path
     wsl_distro: str = "Ubuntu"
 
     # ── Model ──
-    ckpt_path: str = "models/OmniRoam/Preview/preview.ckpt"
-    base_model_path: str = "models/Wan-AI/Wan2.1-T2V-1.3B"
+    ckpt_path: str = "models/OmniRoam/Preview/preview.ckpt"  # relative to install_dir
+    base_model_path: str = "models/Wan-AI/Wan2.1-T2V-1.3B"  # relative to install_dir
 
     # ── Generation ──
     height: int = 480
