@@ -240,7 +240,13 @@
             <!-- Refinement Controls -->
             <div id="refine-panel" class="controls-panel" style="display: none;">
                 <div class="actions-row">
-                    <span class="section-label">Splat Refinement (GSFix3D)</span>
+                    <span class="section-label">Splat Refinement</span>
+                    <div class="param-group" title="Refinement backend: GSFix3D (diffusion inpainting) or OmniRoam (trajectory-coherent video fill)">
+                        <select id="refine-backend" style="font-size: 0.75rem; padding: 2px 4px;">
+                            <option value="gsfix3d" selected>GSFix3D</option>
+                            <option value="omniroam">OmniRoam v2</option>
+                        </select>
+                    </div>
                     <button id="refine-btn" class="action-btn" disabled>
                         <span class="btn-icon">🔧</span>
                         Refine
@@ -250,7 +256,7 @@
                         Refined PLY
                     </button>
                 </div>
-                <div class="params-row">
+                <div class="params-row" id="gsfix3d-params">
                     <div class="param-group" title="Number of novel-view cameras for hole detection. More = better coverage, slower.">
                         <label for="num-cameras">Cameras</label>
                         <select id="num-cameras">
@@ -273,6 +279,32 @@
                         <div class="param-group" title="GSFixer scene adaptation steps. More = better quality, slower (~1min per 100 steps).">
                             <label for="finetune-steps">Finetune Steps</label>
                             <input type="number" id="finetune-steps" value="500" min="100" max="2000" step="100">
+                        </div>
+                    </details>
+                </div>
+                <div class="params-row" id="omniroam-params" style="display: none;">
+                    <div class="param-group" title="Trajectory selection: auto (gap-directed), all (4 cardinal), or specific presets.">
+                        <label for="trajectory-mode">Trajectories</label>
+                        <select id="trajectory-mode">
+                            <option value="auto" selected>Auto (gap-directed)</option>
+                            <option value="all">All cardinal</option>
+                            <option value="forward">Forward only</option>
+                            <option value="forward,right">Forward + Right</option>
+                        </select>
+                    </div>
+                    <div class="param-group" title="Number of refinement iterations.">
+                        <label for="max-rounds-v2">Rounds</label>
+                        <select id="max-rounds-v2">
+                            <option value="1">1</option>
+                            <option value="2">2</option>
+                            <option value="3" selected>3</option>
+                        </select>
+                    </div>
+                    <details class="param-group advanced-params">
+                        <summary>Advanced</summary>
+                        <div class="param-group" title="Weight for OmniRoam pseudo-views (lower = more conservative). Range 0.05-0.50.">
+                            <label for="tier2-weight">Tier-2 Weight</label>
+                            <input type="number" id="tier2-weight" value="0.20" min="0.05" max="0.50" step="0.05">
                         </div>
                     </details>
                 </div>

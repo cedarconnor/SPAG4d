@@ -501,6 +501,125 @@ def _run_refinement(source_job: JobInfo, refine_job: RefineJobInfo) -> dict:
     }
 
 
+@app.post("/api/refine_v2")
+async def start_refinement_v2(
+    job_id: str = Query(..., description="Source conversion job ID"),
+    max_rounds: int = Query(3, ge=1, le=5),
+    trajectory_mode: str = Query("auto", description="auto | all | forward,left,..."),
+    tier2_weight: float = Query(0.20, ge=0.05, le=0.5),
+):
+    """Start OmniRoam-based refinement (v2) on an existing conversion job."""
+    if job_id not in jobs:
+        raise HTTPException(404, "Source job not found")
+
+    job = jobs[job_id]
+    if job.status != "complete":
+        raise HTTPException(400, "Source job not complete")
+
+    if not (job.output_ply_path and job.output_ply_path.exists()):
+        raise HTTPException(400, "PLY file not found")
+    if not (job.input_path and job.input_path.exists()):
+        raise HTTPException(400, "Input panorama not found")
+    if not (job.depth_npy_path and job.depth_npy_path.exists()):
+        raise HTTPException(400, "Depth map not found")
+
+    refine_id = str(uuid.uuid4())
+    refine_job = RefineJobInfo(refine_id, job_id)
+    refine_job.params = {
+        "backend": "omniroam",
+        "max_rounds": max_rounds,
+        "trajectory_mode": trajectory_mode,
+        "tier2_weight": tier2_weight,
+    }
+    refine_job.output_ply_path = TEMP_DIR / f"{refine_id}_refined_v2.ply"
+    refine_job.diagnostics_dir = TEMP_DIR / f"{refine_id}_diagnostics_v2"
+    refine_jobs[refine_id] = refine_job
+
+    asyncio.create_task(process_refinement_v2(refine_job, job))
+
+    return JSONResponse({
+        "refine_job_id": refine_id,
+        "status": "queued",
+        "backend": "omniroam",
+    })
+
+
+async def process_refinement_v2(refine_job: RefineJobInfo, source_job: JobInfo):
+    """Run OmniRoam refinement pipeline in background."""
+    try:
+        async with gpu_semaphore:
+            refine_job.status = "processing"
+            refine_job.last_updated = time.time()
+
+            result = await run_in_threadpool(
+                _run_refinement_v2,
+                source_job=source_job,
+                refine_job=refine_job,
+            )
+
+            refine_job.metrics = result
+            refine_job.status = "complete"
+            refine_job.last_updated = time.time()
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        refine_job.status = "error"
+        refine_job.error = str(e)
+        refine_job.last_updated = time.time()
+
+
+def _run_refinement_v2(source_job: JobInfo, refine_job: RefineJobInfo) -> dict:
+    """Execute the OmniRoam refinement pipeline (blocking, runs in thread)."""
+    import numpy as np
+    from spag4d.refine import refine_splat_v2
+    from spag4d.refine.omniroam_config import OmniRoamConfig
+
+    params = refine_job.params
+    output_dir = refine_job.diagnostics_dir or TEMP_DIR / f"{refine_job.refine_id}_out_v2"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    depth_map = np.load(str(source_job.depth_npy_path))
+
+    # Parse trajectory_mode — could be "auto", "all", or comma-separated list
+    traj_mode = params.get("trajectory_mode", "auto")
+    if "," in traj_mode:
+        traj_mode = [t.strip() for t in traj_mode.split(",")]
+
+    config = OmniRoamConfig(
+        enabled=True,
+        max_iterations=params.get("max_rounds", 3),
+        trajectory_mode=traj_mode,
+        tier2_weight=params.get("tier2_weight", 0.20),
+    )
+
+    def update_progress(round_num, stage, pct):
+        refine_job.round_number = round_num
+        refine_job.stage = stage
+        refine_job.progress_pct = pct
+        refine_job.last_updated = time.time()
+
+    result = refine_splat_v2(
+        ply_path=str(source_job.output_ply_path),
+        panorama_path=str(source_job.input_path),
+        depth_map=depth_map,
+        config=config,
+        output_path=str(refine_job.output_ply_path),
+        progress_callback=update_progress,
+        diagnostics_dir=str(output_dir / "diagnostics"),
+    )
+
+    return {
+        "initial_hole_fraction": result["initial_hole_fraction"],
+        "final_hole_fraction": result["final_hole_fraction"],
+        "final_count": result["gaussians_count"],
+        "iterations_used": result["iterations_used"],
+        "total_time": result["total_time"],
+        "source_anchor_psnr": result.get("source_anchor_psnr"),
+        "backend": "omniroam",
+    }
+
+
 @app.get("/api/refine/status/{refine_id}")
 async def get_refine_status(refine_id: str):
     """Get refinement job status."""
