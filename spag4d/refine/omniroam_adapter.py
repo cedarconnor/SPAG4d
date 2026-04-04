@@ -86,7 +86,7 @@ def validate_wsl_environment(config) -> None:  # config: OmniRoamConfig
     result = subprocess.run(
         [
             "wsl", "-d", distro, "bash", "-c",
-            "conda run -n omniroam python -c 'import torch'",
+            "source ~/miniconda3/etc/profile.d/conda.sh && conda activate omniroam && python -c 'import torch'",
         ],
         capture_output=True,
         text=True,
@@ -173,18 +173,25 @@ def run_omniroam_wsl(
     install_dir = config.install_dir
 
     # Build the inner shell command that runs inside WSL bash.
+    # Source conda init so the non-interactive shell can find conda.
     inner_cmd = (
+        f"source ~/miniconda3/etc/profile.d/conda.sh && "
+        f"conda activate omniroam && "
         f"cd {install_dir} && "
-        f"conda run --no-banner -n omniroam python infer_omniroam.py "
+        f"python infer_omniroam.py "
         f"--local_images_dir {wsl_input_dir} "
         f"--output_dir {wsl_output_dir} "
-        f"--trajectory {preset} "
+        f"--ckpt_path {config.ckpt_path} "
+        f"--use_cam_traj --traj_mode fixed "
+        f"--traj_preset {preset} "
+        f"--re_scale_pose fixed:1.0 "
+        f"--enable_speed_control --speed_fixed {config.speed} "
         f"--height {config.height} "
         f"--width {config.width} "
         f"--num_frames {config.num_frames} "
         f"--cfg_scale {config.cfg_scale} "
-        f"--inference_steps {config.inference_steps} "
-        f"--speed {config.speed}"
+        f"--num_inference_steps {config.inference_steps} "
+        f"--device cuda:0"
     )
 
     cmd = ["wsl", "-d", distro, "bash", "-c", inner_cmd]
@@ -197,6 +204,8 @@ def run_omniroam_wsl(
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        encoding="utf-8",
+        errors="replace",
     )
 
     for line in proc.stdout:

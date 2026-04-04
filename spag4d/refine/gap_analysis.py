@@ -145,5 +145,8 @@ def select_trajectories(report: GapReport, config) -> list:
     if mode == "all":
         return list(config.available_presets)
 
-    # "auto" — use the report's recommendations.
-    return list(report.recommended_trajectories)
+    if mode == "auto":
+        return list(report.recommended_trajectories)
+
+    # Treat as a single preset name (e.g. "forward")
+    return [mode]

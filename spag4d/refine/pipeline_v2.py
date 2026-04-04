@@ -245,6 +245,16 @@ def refine_splat_v2(
     # ── Stage 0: Load initial splat + panorama ──────────────────────────
     report("load", 0)
 
+    # Copy panorama to output directory so it survives temp file cleanup
+    # during long-running OmniRoam generation
+    import shutil
+    safe_pano_dir = Path(output_path).parent / f"_refine_v2_{Path(output_path).stem}"
+    safe_pano_dir.mkdir(parents=True, exist_ok=True)
+    safe_pano_path = safe_pano_dir / Path(panorama_path).name
+    shutil.copy2(panorama_path, safe_pano_path)
+    panorama_path = str(safe_pano_path)
+    logger.info(f"[Stage 0] Panorama preserved at {panorama_path}")
+
     from PIL import Image
     panorama = np.array(Image.open(panorama_path)).astype(np.float32) / 255.0
     if panorama.ndim == 3 and panorama.shape[2] == 4:
@@ -307,7 +317,10 @@ def refine_splat_v2(
     if trajectories and config.enabled:
         validate_wsl_environment(config)
 
-        work_dir = Path(output_path).parent / "_omniroam_work"
+        # Unique work dir per run to avoid stale files from previous runs
+        import hashlib
+        run_hash = hashlib.md5(output_path.encode()).hexdigest()[:8]
+        work_dir = Path(output_path).parent / f"_omniroam_work_{run_hash}"
         work_dir.mkdir(parents=True, exist_ok=True)
 
         for preset in trajectories:

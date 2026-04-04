@@ -157,9 +157,23 @@ async def run_cleanup():
                 if p:
                     active_paths.add(str(p))
 
+    # Also protect files belonging to active refine jobs
+    active_refine_prefixes = set()
+    for rj in refine_jobs.values():
+        if rj.status in ("queued", "processing"):
+            active_refine_prefixes.add(rj.refine_id)
+            active_refine_prefixes.add(rj.source_job_id)
+
     try:
         for f in TEMP_DIR.iterdir():
             if str(f) in active_paths:
+                continue
+            # Skip any file/dir associated with an active refine job
+            fname = f.name
+            if any(prefix in fname for prefix in active_refine_prefixes):
+                continue
+            # Skip OmniRoam work directories while any refine job is active
+            if fname.startswith(("_omniroam_work", "_refine_v2")) and active_refine_prefixes:
                 continue
             if now - f.stat().st_mtime > JOB_TTL_SECONDS:
                 if f.is_dir():
@@ -593,8 +607,7 @@ def _run_refinement_v2(source_job: JobInfo, refine_job: RefineJobInfo) -> dict:
         tier2_weight=params.get("tier2_weight", 0.20),
     )
 
-    def update_progress(round_num, stage, pct):
-        refine_job.round_number = round_num
+    def update_progress(stage, pct):
         refine_job.stage = stage
         refine_job.progress_pct = pct
         refine_job.last_updated = time.time()
