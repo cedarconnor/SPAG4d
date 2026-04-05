@@ -42,7 +42,7 @@ def test_available_presets_default():
 def test_seedvr2_defaults():
     cfg = OmniRoamConfig()
     assert cfg.upscale_backend == "none"
-    assert cfg.seedvr2_model == "seedvr2_ema_7b_sharp_fp16"
+    assert cfg.seedvr2_model == "seedvr2_ema_7b_sharp_fp16.safetensors"
     assert cfg.seedvr2_target_resolution == 1024
     assert cfg.seedvr2_batch_size == 5
     assert cfg.seedvr2_color_correction == "lab"
