@@ -407,6 +407,7 @@ def refine_splat_v2(
                     logger.warning(f"[Stage 3] Failed to extract upscaled frames for {preset}")
         except Exception as e:
             logger.error(f"[Stage 3] SeedVR2 upscale FAILED: {e}", exc_info=True)
+            raise  # Don't silently skip upscale — let the caller know
 
     elif config.upscale_backend != "none":
         logger.warning(f"[Stage 3] Unknown upscale backend: {config.upscale_backend}")
