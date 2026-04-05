@@ -366,38 +366,47 @@ def refine_splat_v2(
     # ── Stage 3: Upscale (OPTIONAL) ────────────────────────────────────
     report("upscale", 35)
 
+    logger.info(f"[Stage 3] upscale_backend={config.upscale_backend}, "
+                f"frames_available={bool(omniroam_frames_by_traj)}, "
+                f"work_dir={'work_dir' in dir()}")
+
     if config.upscale_backend == "seedvr2" and omniroam_frames_by_traj:
         logger.info(f"[Stage 3] Upscaling with SeedVR2 "
                      f"(resolution={config.seedvr2_target_resolution})")
-        validate_seedvr2_environment(config)
+        try:
+            validate_seedvr2_environment(config)
 
-        for preset in list(omniroam_frames_by_traj.keys()):
-            report(f"upscale_{preset}", 35)
+            for preset in list(omniroam_frames_by_traj.keys()):
+                report(f"upscale_{preset}", 35)
 
-            # Find the generated video for this trajectory
-            traj_dir = work_dir / preset
-            videos = list(traj_dir.rglob("generated.mp4"))
-            if not videos:
-                logger.warning(f"[Stage 3] No video found for preset={preset}, skipping upscale")
-                continue
+                # Find the generated video for this trajectory
+                traj_dir = work_dir / preset
+                logger.info(f"[Stage 3] Looking for video in {traj_dir}")
+                videos = list(traj_dir.rglob("generated.mp4"))
+                if not videos:
+                    logger.warning(f"[Stage 3] No video found for preset={preset}, skipping upscale")
+                    continue
 
-            src_video = str(videos[0])
-            upscaled_video = str(videos[0].parent / "generated_upscaled.mp4")
+                src_video = str(videos[0])
+                upscaled_video = str(videos[0].parent / "generated_upscaled.mp4")
+                logger.info(f"[Stage 3] Upscaling {src_video}")
 
-            run_seedvr2_upscale(
-                video_path=src_video,
-                output_path=upscaled_video,
-                config=config,
-            )
+                run_seedvr2_upscale(
+                    video_path=src_video,
+                    output_path=upscaled_video,
+                    config=config,
+                )
 
-            # Re-extract frames from the upscaled video
-            upscaled_frames = extract_video_frames(upscaled_video)
-            if upscaled_frames:
-                logger.info(f"[Stage 3] Upscaled {preset}: {len(upscaled_frames)} frames "
-                            f"at {upscaled_frames[0].shape[1]}x{upscaled_frames[0].shape[0]}")
-                omniroam_frames_by_traj[preset] = upscaled_frames
-            else:
-                logger.warning(f"[Stage 3] Failed to extract upscaled frames for {preset}")
+                # Re-extract frames from the upscaled video
+                upscaled_frames = extract_video_frames(upscaled_video)
+                if upscaled_frames:
+                    logger.info(f"[Stage 3] Upscaled {preset}: {len(upscaled_frames)} frames "
+                                f"at {upscaled_frames[0].shape[1]}x{upscaled_frames[0].shape[0]}")
+                    omniroam_frames_by_traj[preset] = upscaled_frames
+                else:
+                    logger.warning(f"[Stage 3] Failed to extract upscaled frames for {preset}")
+        except Exception as e:
+            logger.error(f"[Stage 3] SeedVR2 upscale FAILED: {e}", exc_info=True)
 
     elif config.upscale_backend != "none":
         logger.warning(f"[Stage 3] Unknown upscale backend: {config.upscale_backend}")

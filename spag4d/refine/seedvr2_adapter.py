@@ -56,6 +56,7 @@ def _build_seedvr2_args(
         "--batch_size", str(config.seedvr2_batch_size),
         "--color_correction", config.seedvr2_color_correction,
         "--blocks_to_swap", str(config.seedvr2_block_swap),
+        "--dit_offload_device", "cpu",
         "--cuda_device", "0",
         "--video_backend", "opencv",
     ]

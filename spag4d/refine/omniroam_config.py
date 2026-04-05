@@ -42,7 +42,7 @@ class OmniRoamConfig:
     # ── Upscale (optional) ──
     upscale_backend: str = "none"  # "none" | "seedvr2"
     seedvr2_install_dir: str = "/home/cedarconnor/ComfyUI-SeedVR2_VideoUpscaler"
-    seedvr2_model: str = "seedvr2_ema_7b_sharp_fp16.safetensors"  # dit_model name
+    seedvr2_model: str = "seedvr2_ema_3b_fp16.safetensors"  # dit_model name (3B=6.4GB, 7B=14GB)
     seedvr2_target_resolution: int = 1024  # short-side pixels (2x from 480)
     seedvr2_batch_size: int = 5  # frames per batch (4n+1 pattern)
     seedvr2_color_correction: str = "lab"  # "lab" | "wavelet" | "none"
