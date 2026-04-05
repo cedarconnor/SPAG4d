@@ -340,7 +340,7 @@ def refine_splat_v2(
             )
 
             # Find the output video
-            videos = glob.glob(str(traj_dir / "*.mp4"))
+            videos = glob.glob(str(traj_dir / "**" / "generated.mp4"), recursive=True)
             if not videos:
                 logger.warning(f"[Stage 2] No video output for preset={preset}")
                 continue
@@ -367,8 +367,7 @@ def refine_splat_v2(
     report("upscale", 35)
 
     logger.info(f"[Stage 3] upscale_backend={config.upscale_backend}, "
-                f"frames_available={bool(omniroam_frames_by_traj)}, "
-                f"work_dir={'work_dir' in dir()}")
+                f"frames_available={bool(omniroam_frames_by_traj)}")
 
     if config.upscale_backend == "seedvr2" and omniroam_frames_by_traj:
         logger.info(f"[Stage 3] Upscaling with SeedVR2 "
