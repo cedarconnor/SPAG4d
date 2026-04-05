@@ -300,6 +300,13 @@
                             <option value="3" selected>3</option>
                         </select>
                     </div>
+                    <div class="param-group" title="Optional video upscaling after OmniRoam generation. SeedVR2 upscales 480p to ~1024p for sharper perspective crops.">
+                        <label for="upscale-backend">Upscale</label>
+                        <select id="upscale-backend">
+                            <option value="none" selected>None (480p)</option>
+                            <option value="seedvr2">SeedVR2 (1024p)</option>
+                        </select>
+                    </div>
                     <details class="param-group advanced-params">
                         <summary>Advanced</summary>
                         <div class="param-group" title="Weight for OmniRoam pseudo-views (lower = more conservative). Range 0.05-0.50.">

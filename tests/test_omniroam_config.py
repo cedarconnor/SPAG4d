@@ -39,6 +39,17 @@ def test_available_presets_default():
     assert "s_curve" not in cfg.available_presets
 
 
+def test_seedvr2_defaults():
+    cfg = OmniRoamConfig()
+    assert cfg.upscale_backend == "none"
+    assert cfg.seedvr2_model == "seedvr2_ema_7b_sharp_fp16"
+    assert cfg.seedvr2_target_resolution == 1024
+    assert cfg.seedvr2_batch_size == 5
+    assert cfg.seedvr2_color_correction == "lab"
+    assert cfg.seedvr2_block_swap == 36
+    assert cfg.seedvr2_install_dir == "/home/cedarconnor/ComfyUI-SeedVR2_VideoUpscaler"
+
+
 def test_available_presets_independent():
     """Default list should not be shared across instances."""
     a = OmniRoamConfig()

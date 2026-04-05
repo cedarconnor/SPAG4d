@@ -39,8 +39,14 @@ class OmniRoamConfig:
     min_gap_ratio: float = 0.05
     max_omniroam_views: int = 200
 
-    # ── Upscale (optional, Phase 2) ──
-    upscale_backend: str = "none"
+    # ── Upscale (optional) ──
+    upscale_backend: str = "none"  # "none" | "seedvr2"
+    seedvr2_install_dir: str = "/home/cedarconnor/ComfyUI-SeedVR2_VideoUpscaler"
+    seedvr2_model: str = "seedvr2_ema_7b_sharp_fp16"  # dit_model name
+    seedvr2_target_resolution: int = 1024  # short-side pixels (2x from 480)
+    seedvr2_batch_size: int = 5  # frames per batch (4n+1 pattern)
+    seedvr2_color_correction: str = "lab"  # "lab" | "wavelet" | "none"
+    seedvr2_block_swap: int = 36  # transformer blocks to swap (0-36 for 7B)
 
     # ── Supervision ──
     tier2_weight: float = 0.20

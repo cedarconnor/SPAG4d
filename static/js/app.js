@@ -386,6 +386,7 @@ class SPAG4DApp {
                 max_rounds: document.getElementById('max-rounds-v2')?.value || '3',
                 trajectory_mode: document.getElementById('trajectory-mode')?.value || 'auto',
                 tier2_weight: document.getElementById('tier2-weight')?.value || '0.20',
+                upscale_backend: document.getElementById('upscale-backend')?.value || 'none',
             });
             endpoint = '/api/refine_v2';
         } else {
@@ -441,6 +442,7 @@ class SPAG4DApp {
             'omniroam_generate': 'Generating views (OmniRoam)',
             'view_selection': 'Selecting views',
             'gap_seeding': 'Seeding gap regions',
+            'upscale': 'Upscaling video (SeedVR2)',
             'optimize': 'Optimizing (tier-1 + tier-2)',
             'validate': 'Validating results',
             'done': 'Complete',

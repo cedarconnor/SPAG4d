@@ -27,6 +27,7 @@ from .gap_analysis import classify_gap_directions, select_trajectories
 from .view_selector import extract_perspective_crop, compute_perspective_pose, filter_views_by_gap
 from .scale_alignment import parse_scale_config, estimate_scale_factor
 from .gap_seeding import seed_gap_gaussians
+from .seedvr2_adapter import validate_seedvr2_environment, run_seedvr2_upscale
 from .validation import compute_psnr, compute_coverage, check_source_anchor
 from .camera_rig import (
     generate_camera_rig, render_with_hole_mask, extract_cubemap_views, CameraPose,
@@ -362,11 +363,44 @@ def refine_splat_v2(
     elif trajectories and not config.enabled:
         logger.info("[Stage 2] OmniRoam disabled in config — skipping generation")
 
-    # ── Stage 3: Upscale (OPTIONAL — skipped in Phase 1) ───────────────
+    # ── Stage 3: Upscale (OPTIONAL) ────────────────────────────────────
     report("upscale", 35)
 
-    if config.upscale_backend != "none":
-        logger.info(f"[Stage 3] Upscale backend={config.upscale_backend} — not yet implemented")
+    if config.upscale_backend == "seedvr2" and omniroam_frames_by_traj:
+        logger.info(f"[Stage 3] Upscaling with SeedVR2 "
+                     f"(resolution={config.seedvr2_target_resolution})")
+        validate_seedvr2_environment(config)
+
+        for preset in list(omniroam_frames_by_traj.keys()):
+            report(f"upscale_{preset}", 35)
+
+            # Find the generated video for this trajectory
+            traj_dir = work_dir / preset
+            videos = list(traj_dir.rglob("generated.mp4"))
+            if not videos:
+                logger.warning(f"[Stage 3] No video found for preset={preset}, skipping upscale")
+                continue
+
+            src_video = str(videos[0])
+            upscaled_video = str(videos[0].parent / "generated_upscaled.mp4")
+
+            run_seedvr2_upscale(
+                video_path=src_video,
+                output_path=upscaled_video,
+                config=config,
+            )
+
+            # Re-extract frames from the upscaled video
+            upscaled_frames = extract_video_frames(upscaled_video)
+            if upscaled_frames:
+                logger.info(f"[Stage 3] Upscaled {preset}: {len(upscaled_frames)} frames "
+                            f"at {upscaled_frames[0].shape[1]}x{upscaled_frames[0].shape[0]}")
+                omniroam_frames_by_traj[preset] = upscaled_frames
+            else:
+                logger.warning(f"[Stage 3] Failed to extract upscaled frames for {preset}")
+
+    elif config.upscale_backend != "none":
+        logger.warning(f"[Stage 3] Unknown upscale backend: {config.upscale_backend}")
     else:
         logger.info("[Stage 3] Upscale skipped (backend=none)")
 

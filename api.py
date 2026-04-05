@@ -521,6 +521,7 @@ async def start_refinement_v2(
     max_rounds: int = Query(3, ge=1, le=5),
     trajectory_mode: str = Query("auto", description="auto | all | forward,left,..."),
     tier2_weight: float = Query(0.20, ge=0.05, le=0.5),
+    upscale_backend: str = Query("none", description="none | seedvr2"),
 ):
     """Start OmniRoam-based refinement (v2) on an existing conversion job."""
     if job_id not in jobs:
@@ -544,6 +545,7 @@ async def start_refinement_v2(
         "max_rounds": max_rounds,
         "trajectory_mode": trajectory_mode,
         "tier2_weight": tier2_weight,
+        "upscale_backend": upscale_backend,
     }
     refine_job.output_ply_path = TEMP_DIR / f"{refine_id}_refined_v2.ply"
     refine_job.diagnostics_dir = TEMP_DIR / f"{refine_id}_diagnostics_v2"
@@ -605,6 +607,7 @@ def _run_refinement_v2(source_job: JobInfo, refine_job: RefineJobInfo) -> dict:
         max_iterations=params.get("max_rounds", 3),
         trajectory_mode=traj_mode,
         tier2_weight=params.get("tier2_weight", 0.20),
+        upscale_backend=params.get("upscale_backend", "none"),
     )
 
     def update_progress(stage, pct):
