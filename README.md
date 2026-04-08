@@ -2,11 +2,13 @@
 
 Convert 360 panoramic photos into explorable 3D Gaussian Splat scenes.
 
-SPAG-4D takes an equirectangular panorama, estimates depth with [DA360](https://github.com/Insta360-Research-Team/DA360) (default) or [DAP](https://github.com/Insta360-Research-Team/DAP), and converts it into a 3D Gaussian Splat using spherical projection. One Gaussian per pixel, colors taken directly from the source image, geometry from the depth model. Fast, accurate, no stitching artifacts.
+SPAG-4D takes an equirectangular panorama and converts it into a 3D Gaussian Splat using one of three generator backends. Two depth-based generators (DA360, DAP) project depth maps into Gaussians via spherical geometry. A third generator (SHARP 360) uses Apple's [SHARP](https://github.com/apple/ml-sharp) model to predict Gaussians directly from perspective face crops, with DA360 depth alignment for inter-face consistency.
 
-Two refinement backends fill disocclusion holes from novel viewpoints:
+Optional refinement fills disocclusion holes from novel viewpoints:
 - **GSFix3D** (default) -- scene-adapted diffusion inpainting per camera
-- **OmniRoam v2** (optional) -- trajectory-coherent panoramic video generation via [OmniRoam](https://github.com/yuhengliu02/OmniRoam) with optional [SeedVR2](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler) video upscaling
+- **OmniRoam v2** (optional) -- trajectory-coherent panoramic video generation via [OmniRoam](https://github.com/yuhengliu02/OmniRoam) with optional [SeedVR2](https://github.com/TencentARC/SeedVR) video upscaling
+
+Optional pre-processing upscales input with [SeedVR2](https://github.com/TencentARC/SeedVR) image upscaling (used natively on Windows for both SHARP face upscaling and OmniRoam video upscaling).
 
 <p align="center">
   <img src="assets/demo.gif" alt="SPAG-4D demo -- panorama to 3D Gaussian splat" width="720">
@@ -16,22 +18,32 @@ Two refinement backends fill disocclusion holes from novel viewpoints:
 
 ## Quick Start (Windows)
 
-> Requires an NVIDIA GPU (6 GB+ VRAM for conversion, 16 GB+ for refinement, 48 GB for OmniRoam), [Git](https://git-scm.com/downloads), and ~30 GB disk space.
+> Requires an NVIDIA GPU (6 GB+ VRAM for DA360/DAP, 8 GB+ for SHARP 360, 16 GB+ for refinement), [Git](https://git-scm.com/downloads), and ~30 GB disk space.
 
 1. Download and extract the SPAG-4D release `.zip`.
 2. Double-click **`install.bat`** and wait for "Installation Complete!"
 3. Double-click **`run.bat`**.
-4. Your browser opens to **http://localhost:7860** with a demo panorama loaded. Hit **Convert**.
+4. Your browser opens to **http://localhost:7860** with a demo panorama loaded. Select a generator and hit **Convert**.
 
 See [INSTALL.md](INSTALL.md) for the full walkthrough and troubleshooting.
 
 ---
 
-## How It Works
+## Generators
+
+SPAG-4D offers three ways to convert a panorama into Gaussians:
+
+| Generator | How It Works | Speed | Quality | VRAM |
+|-----------|-------------|-------|---------|------|
+| **DA360** (default) | DA360 depth estimation + SPAG spherical projection | ~2s | Good | ~2 GB |
+| **DAP** | DAP metric depth + SPAG spherical projection | ~3s | Good | ~3 GB |
+| **SHARP 360** | Per-face SHARP prediction + DA360 alignment + merge | ~30s | Higher detail | ~8 GB |
+
+### DA360 / DAP (Depth-Based)
 
 ```
 360 equirectangular panorama
-  -> DA360 depth estimation (scale-invariant, circular-padding DPT)
+  -> Depth estimation (DA360 or DAP)
   -> Scene analysis: auto-compute depth range, sky cutoff, orbit radius
   -> Spherical projection: depth * ray_direction = 3D Gaussian positions
   -> Colors sampled directly from source pixels (sRGB)
@@ -39,9 +51,22 @@ See [INSTALL.md](INSTALL.md) for the full walkthrough and troubleshooting.
   -> Standard PLY export
 ```
 
-Each pixel in the panorama becomes one Gaussian splat (at stride=1) or every Nth pixel (at stride=2, 4, etc.). The depth model provides geometry, the source image provides color. No face stitching, no seam artifacts.
+Each pixel becomes one Gaussian (at stride=1) or every Nth pixel (at stride=2, 4, etc.). No face stitching, no seam artifacts.
 
-The output is a standard `.ply` file compatible with [SuperSplat](https://playcanvas.com/supersplat/editor), [gsplat](https://docs.gsplat.studio/), Blender, and any 3DGS viewer. SPAG-4D includes a built-in web viewer powered by [GaussianSplats3D](https://github.com/mkkellogg/GaussianSplats3D).
+### SHARP 360 (ML-Based)
+
+```
+360 equirectangular panorama
+  -> Extract N perspective face crops (default: 6 horizon views with overlap)
+  -> Optional SeedVR2 upscale per face
+  -> Apple SHARP prediction per face (Gaussians predicted directly from image)
+  -> Hard Voronoi border clipping (360/N degrees per face)
+  -> DA360 depth alignment (smooth grid scale field for inter-face consistency)
+  -> Rotate each face into world frame + merge
+  -> Global scale restore + PLY export
+```
+
+SHARP predicts Gaussians directly from images using a learned model -- no separate depth estimation needed. The DA360 alignment step ensures faces agree on scale at their boundaries.
 
 ---
 
@@ -59,29 +84,37 @@ Or manually:
 python -m spag4d serve --port 7860
 ```
 
-Upload a 360 image, adjust settings, click **Convert**, and explore the result in the 3D viewer. Left-click to orbit, right-click to pan, scroll to zoom.
+Upload a 360 image, select a generator (DA360, DAP, or SHARP 360), adjust settings, click **Convert**, and explore the result in the 3D viewer. Left-click to orbit, right-click to pan, scroll to zoom.
+
+When SHARP 360 is selected, additional settings appear: side count (how many perspective views) and an optional SeedVR2 upscale checkbox.
 
 The refinement panel appears after conversion with a backend dropdown: **GSFix3D** (diffusion inpainting) or **OmniRoam v2** (trajectory-coherent video fill with optional SeedVR2 upscaling).
 
 ### Command Line
 
 ```bash
-# Default (DA360 depth + SPAG conversion, auto scene defaults)
+# DA360 generator (default)
 python -m spag4d convert panorama.jpg output.ply
 
-# Max quality (one Gaussian per pixel)
+# DAP generator
+python -m spag4d convert panorama.jpg output.ply --generator dap
+
+# SHARP 360 generator (6 faces, no upscale)
+python -m spag4d convert panorama.jpg output.ply --generator sharp360
+
+# SHARP 360 with 8 faces and SeedVR2 upscale
+python -m spag4d convert panorama.jpg output.ply --generator sharp360 --side-count 8 --seedvr2-upscale
+
+# DA360 with max quality (one Gaussian per pixel)
 python -m spag4d convert panorama.jpg output.ply --stride 1
 
-# Fast preview
+# DA360 fast preview
 python -m spag4d convert panorama.jpg output.ply --stride 4
-
-# Use DAP depth model instead of DA360
-python -m spag4d convert panorama.jpg output.ply --depth-model dap
 
 # Convert + fill disocclusion holes with GSFix3D
 python -m spag4d convert panorama.jpg output.ply --refine
 
-# Pre-download all model weights (including GSFix3D checkpoint)
+# Pre-download all model weights
 python -m spag4d download-models
 ```
 
@@ -92,13 +125,16 @@ from spag4d import SPAG4D
 
 converter = SPAG4D(device="cuda")
 
-# Auto scene defaults (depth range, sky cutoff computed from depth map)
+# DA360 generator (default)
 result = converter.convert("panorama.jpg", "output.ply", stride=2)
 
-# Manual overrides
+# SHARP 360 generator
 result = converter.convert("panorama.jpg", "output.ply",
-    depth_min=0.5, depth_max=50.0, sky_threshold=30.0,
-    grazing_angle=65.0)
+    generator="sharp360", side_count=6)
+
+# SHARP 360 with SeedVR2 face upscaling
+result = converter.convert("panorama.jpg", "output.ply",
+    generator="sharp360", side_count=8, seedvr2_upscale=True)
 
 print(f"{result.splat_count:,} Gaussians in {result.processing_time:.1f}s")
 ```
@@ -107,7 +143,7 @@ print(f"{result.splat_count:,} Gaussians in {result.processing_time:.1f}s")
 
 ## Refinement
 
-Single-viewpoint panoramas produce 3D Gaussians with structural holes -- areas behind foreground objects and at depth discontinuities that the original camera never observed. SPAG-4D offers two refinement backends to fill these holes.
+Single-viewpoint panoramas produce 3D Gaussians with structural holes -- areas behind foreground objects and at depth discontinuities that the original camera never observed. SPAG-4D offers two refinement backends to fill these holes. Refinement works on any PLY regardless of which generator produced it.
 
 ### Backend 1: GSFix3D (Default)
 
@@ -130,15 +166,15 @@ python -m spag4d convert panorama.jpg output.ply --refine
 Uses [OmniRoam](https://github.com/yuhengliu02/OmniRoam) to generate trajectory-coherent panoramic walkthrough video, then extracts perspective crops as pseudo-supervision for gap filling. Produces temporally consistent fill content instead of independent per-view inpainting.
 
 **How it works:**
-1. **Gap analysis** -- Render from 36 evaluation cameras, classify hole severity by direction (forward, left, right, backward)
+1. **Gap analysis** -- Render from 36 evaluation cameras, classify hole severity by direction
 2. **OmniRoam generation** -- Generate 81-frame 480x960 ERP video along gap-directed trajectories (runs in WSL2)
-3. **SeedVR2 upscale** (optional) -- Upscale video from 480p to 1024p using [SeedVR2](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler) video restoration
-4. **View selection** -- Extract perspective crops from frames that overlap gap regions, filter by gap ratio
+3. **SeedVR2 upscale** (optional) -- Upscale video from 480p to 1024p using SeedVR2 (runs natively on Windows)
+4. **View selection** -- Extract perspective crops from frames that overlap gap regions
 5. **Gap seeding** -- Seed sparse Gaussians into gap regions using the source panorama's depth map
 6. **Optimization** -- Distill with tier-1 (original cubemap, weight 1.0) + tier-2 (OmniRoam pseudo-views, weight 0.20)
 7. **Validation** -- Source-anchor PSNR check, coverage measurement, PLY export
 
-**Requirements:** WSL2 with Ubuntu, 48 GB VRAM (A6000 or better), ~20 GB disk for model weights.
+**Requirements:** WSL2 with Ubuntu for OmniRoam generation, 48 GB VRAM (A6000 or better), ~20 GB disk for model weights.
 
 #### OmniRoam Setup
 
@@ -146,8 +182,7 @@ Uses [OmniRoam](https://github.com/yuhengliu02/OmniRoam) to generate trajectory-
 # 1. Install OmniRoam in WSL2
 wsl bash scripts/setup_omniroam_wsl.sh
 
-# 2. (Optional) SeedVR2 is installed automatically by the setup script.
-#    Model weights download on first use (~6 GB for 3B, ~14 GB for 7B).
+# 2. SeedVR2 runs natively on Windows (no WSL2 needed for upscaling)
 ```
 
 #### OmniRoam Python API
@@ -179,18 +214,46 @@ result = refine_splat_v2(
 | **Consistency** | Independent per camera | Temporally coherent across 81 frames |
 | **Speed** | ~5 min | ~30 min (+ ~4 min with SeedVR2) |
 | **VRAM** | 16 GB | 48 GB |
-| **Platform** | Windows native | WSL2 (Linux) |
-| **Upscaling** | N/A | Optional SeedVR2 (480p to 1024p) |
+| **Platform** | Windows native | WSL2 (OmniRoam) + Windows (SeedVR2 upscale) |
+| **Upscaling** | N/A | Optional SeedVR2 (480p to 1024p, native Windows) |
+
+---
+
+## SeedVR2 Upscaling
+
+[SeedVR2](https://github.com/TencentARC/SeedVR) provides neural image and video upscaling. SPAG-4D uses it natively on Windows in two contexts:
+
+| Context | Mode | When |
+|---------|------|------|
+| **SHARP 360 face upscale** | Image | Before SHARP prediction -- upscale each perspective face crop |
+| **OmniRoam video upscale** | Video | After OmniRoam generation -- upscale 480p video to 1024p |
+
+### Setup
+
+```bash
+# Clone SeedVR2 into third_party/
+git clone https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler.git third_party/seedvr2_videoupscaler
+
+# Download model weights (~6.4 GB for 3B model)
+# Place in third_party/seedvr2_videoupscaler/models/seedvr2_ema_3b_fp16.safetensors
+```
+
+SeedVR2 runs as a native Windows subprocess -- no WSL2 required.
 
 ---
 
 ## Settings
 
-### Conversion Parameters
+### Generator Settings
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `depth_model` | `da360` | Depth model: `da360` (recommended) or `dap` (metric depth) |
+| `generator` | `da360` | Generator backend: `da360`, `dap`, or `sharp360` |
+
+### DA360/DAP Settings (Depth-Based)
+
+| Setting | Default | Description |
+|---------|---------|-------------|
 | `stride` | `2` | Pixel stride: `1`=full density, `2`=quarter, `4`=sixteenth |
 | `depth_min` | Auto | Clip geometry closer than this (meters). Auto = 1st percentile of depth. |
 | `depth_max` | Auto | Clip geometry farther than this (meters). Auto = 99th percentile. |
@@ -200,7 +263,12 @@ result = refine_splat_v2(
 | `sparse_pruning` | `0.3` | Remove isolated splats. 0=off, 1=aggressive. |
 | `global_scale` | `1.0` | Multiply all depths by this factor |
 
-Parameters marked "Auto" are computed from the depth map's statistical distribution, adapting to both indoor (3m rooms) and outdoor (100m forests) scenes without manual tuning. You can override any auto value by setting it explicitly.
+### SHARP 360 Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `side_count` | `6` | Number of horizon perspective views (4, 6, 8, 10, or 12) |
+| `seedvr2_upscale` | `false` | Upscale face images with SeedVR2 before SHARP prediction |
 
 ### GSFix3D Refinement Settings
 
@@ -217,9 +285,9 @@ Parameters marked "Auto" are computed from the depth map's statistical distribut
 | Trajectories | Auto | `auto` (gap-directed), `all` (4 cardinal), or specific presets |
 | Rounds | 3 | Maximum refinement iterations |
 | Tier-2 Weight | 0.20 | OmniRoam pseudo-view loss weight (0.05-0.50) |
-| Upscale | None | `none` (480p) or `seedvr2` (1024p) |
+| Upscale | None | `none` (480p) or `seedvr2` (1024p, native Windows) |
 
-### Stride Guide
+### Stride Guide (DA360/DAP Only)
 
 | Stride | Gaussians (4096x2048 input) | File Size | Speed |
 |--------|----------------------------|-----------|-------|
@@ -234,10 +302,10 @@ Parameters marked "Auto" are computed from the depth map's statistical distribut
 
 | Model | Default | Description |
 |-------|---------|-------------|
-| **DA360** | Yes | Depth Anything V2 with circular-padding DPT decoder. Seamless 360 depth with no boundary artifacts. Superior results in most scenes. |
-| **DAP** | No | Depth Any Panorama. Outputs metric radial depth. Alternative option. |
+| **DA360** | Yes | Depth Anything V2 with circular-padding DPT decoder. Seamless 360 depth with no boundary artifacts. |
+| **DAP** | No | Depth Any Panorama. Outputs metric radial depth. |
 
-Both models download weights automatically on first use (~1.3-1.5 GB each).
+Both models download weights automatically on first use (~1.3-1.5 GB each). DA360 is also used internally by SHARP 360 for inter-face depth alignment.
 
 ---
 
@@ -260,6 +328,15 @@ git submodule update --init --recursive
 # Download model weights
 python -m spag4d download-models
 
+# For SHARP 360 generator (optional):
+pip install plyfile
+# ml-sharp is already vendored in spag4d/sharp_arch/ml-sharp/
+# SHARP checkpoint auto-downloads on first use (~500 MB)
+
+# For SeedVR2 upscaling (optional):
+git clone https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler.git third_party/seedvr2_videoupscaler
+# Download model weights into third_party/seedvr2_videoupscaler/models/
+
 # For GSFix3D refinement (optional, requires 16GB+ VRAM):
 pip install diffusers transformers open3d trimesh scipy
 python -m spag4d download-models --model gsfix3d
@@ -274,7 +351,9 @@ wsl bash scripts/setup_omniroam_wsl.sh
 
 ```
 spag4d/                          # Core conversion pipeline
-  core.py                        # Pipeline orchestrator (auto scene defaults)
+  core.py                        # Pipeline orchestrator (generator dispatch)
+  sharp360.py                    # SHARP 360 generator (face extraction + prediction + merge)
+  seedvr2.py                     # Native Windows SeedVR2 adapter (image + video)
   scene_analysis.py              # Scale-relative parameter computation
   spag_converter.py              # Depth-to-Gaussian spherical projection
   dap_model.py                   # DAP depth estimation
@@ -283,6 +362,11 @@ spag4d/                          # Core conversion pipeline
   scene_filter.py                # Edge clipping, outlier pruning, sparse filtering
   spherical_grid.py              # 360 coordinate math
   cli.py                         # CLI commands
+
+spag4d/sharp_arch/ml-sharp/      # Vendored Apple SHARP model
+  src/sharp/models/              # SHARP predictor architecture
+  src/sharp/utils/               # Gaussians3D, color space, PLY export
+  src/sharp/cli/predict.py       # predict_image() inference function
 
 spag4d/refine/                   # Refinement pipelines
   pipeline.py                    # GSFix3D 3-phase refinement orchestrator
@@ -293,7 +377,6 @@ spag4d/refine/                   # Refinement pipelines
   gsfixer_adapter.py             # GSFixer diffusion model (fine-tune + inference)
   omniroam_adapter.py            # OmniRoam WSL2 subprocess wrapper
   omniroam_trajectory.py         # Trajectory generation (matches upstream OmniRoam)
-  seedvr2_adapter.py             # SeedVR2 video upscale WSL2 wrapper
   gap_analysis.py                # Hole classification by angular direction
   view_selector.py               # Perspective crop extraction + gap-directed filtering
   scale_alignment.py             # Reprojection-based OmniRoam-to-splat scale alignment
@@ -306,15 +389,14 @@ spag4d/refine/                   # Refinement pipelines
 
 api.py                           # FastAPI web server + refine v1/v2 endpoints
 static/
-  index.html                     # Web UI with refinement backend toggle
+  index.html                     # Web UI with generator toggle + refinement backend
   css/style.css
   js/
     viewer.js                    # GaussianSplats3D wrapper
-    app.js                       # UI logic (conversion + dual-backend refinement)
+    app.js                       # UI logic (generator selection + refinement)
 
 scripts/
-  setup_omniroam_wsl.sh          # WSL2 OmniRoam + SeedVR2 installation
-  regenerate_trajectory_snapshots.sh  # Upstream trajectory parity verification
+  setup_omniroam_wsl.sh          # WSL2 OmniRoam installation
 ```
 
 ## Troubleshooting
@@ -323,24 +405,30 @@ scripts/
 |---------|----------|
 | `No module named 'spag4d.dap_arch.DAP.networks'` | `git submodule update --init --recursive` |
 | DA360 not found | `git clone https://github.com/Insta360-Research-Team/DA360 spag4d/da360_arch/DA360` |
-| CUDA out of memory (conversion) | Use `--stride 4` or lower input image resolution |
+| SHARP checkpoint download fails | Check network connection; checkpoint is ~500 MB from `ml-site.cdn-apple.com` |
+| `No module named 'sharp'` | Ensure `spag4d/sharp_arch/ml-sharp/src/` exists (should be vendored) |
+| `No module named 'plyfile'` | `pip install plyfile` (required for SHARP PLY export) |
+| SeedVR2 not found | Clone into `third_party/seedvr2_videoupscaler/` and download model weights |
+| CUDA out of memory (conversion) | Use DA360 with `--stride 4`, or reduce panorama resolution |
+| CUDA out of memory (SHARP 360) | Reduce `--side-count 4`, or disable `--seedvr2-upscale` |
 | CUDA out of memory (GSFix3D) | Needs ~16 GB VRAM. Reduce cameras or render resolution |
 | CUDA out of memory (OmniRoam) | Needs ~48 GB VRAM. Use an A6000 or better |
 | OmniRoam WSL2 not found | Run `wsl bash scripts/setup_omniroam_wsl.sh` |
-| SeedVR2 BlockSwap error | Ensure `--dit_offload_device cpu` is set (handled automatically) |
 | Port 7860 in use | Edit `run.bat` and change the port |
 | Scene defaults look wrong | Override with explicit `depth_min`, `depth_max`, `sky_threshold` values |
 
 ## References
 
+- [SHARP -- Single-image to 3D Gaussians](https://github.com/apple/ml-sharp) (Apple, CVPR 2025)
+- [SHARP 360 to Splat](https://github.com/Enndee/SHARP_360_to_Splat) -- reference implementation for 360 SHARP pipeline
 - [DA360 -- Depth Anything in 360](https://github.com/Insta360-Research-Team/DA360)
 - [DAP -- Depth Any Panorama](https://github.com/Insta360-Research-Team/DAP)
 - [GSFix3D -- Diffusion-Guided Novel View Repair](https://github.com/mobileroboticslab/GSFix3D)
 - [OmniRoam -- Panoramic Video Generation](https://github.com/yuhengliu02/OmniRoam) (Adobe Research, SIGGRAPH 2026)
-- [SeedVR2 -- Video Upscaling](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler) (ByteDance, ICLR 2026)
+- [SeedVR2 -- Video/Image Upscaling](https://github.com/TencentARC/SeedVR) (ByteDance, ICLR 2026)
 - [GaussianSplats3D](https://github.com/mkkellogg/GaussianSplats3D)
 - [3D Gaussian Splatting](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/)
 
 ## License
 
-MIT. Note: OmniRoam is subject to Adobe Research License (noncommercial research only). SeedVR2 is MIT. The OmniRoam integration is an optional module -- core SPAG-4D remains MIT.
+MIT. Note: SHARP model weights are subject to Apple's model license (noncommercial research only). SHARP source code is Apple MIT-equivalent. OmniRoam is subject to Adobe Research License (noncommercial research only). SeedVR2 is MIT. These integrations are optional modules -- core SPAG-4D remains MIT.
