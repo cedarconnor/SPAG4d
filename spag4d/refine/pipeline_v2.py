@@ -27,7 +27,7 @@ from .gap_analysis import classify_gap_directions, select_trajectories
 from .view_selector import extract_perspective_crop, compute_perspective_pose, filter_views_by_gap
 from .scale_alignment import parse_scale_config, estimate_scale_factor
 from .gap_seeding import seed_gap_gaussians
-from .seedvr2_adapter import validate_seedvr2_environment, run_seedvr2_upscale
+from ..seedvr2 import upscale_video as seedvr2_upscale_video, SeedVR2Config, validate_seedvr2_environment
 from .validation import compute_psnr, compute_coverage, check_source_anchor
 from .camera_rig import (
     generate_camera_rig, render_with_hole_mask, extract_cubemap_views, CameraPose,
@@ -373,14 +373,18 @@ def refine_splat_v2(
         logger.info(f"[Stage 3] Upscaling with SeedVR2 "
                      f"(resolution={config.seedvr2_target_resolution})")
         try:
-            validate_seedvr2_environment(config)
+            seedvr2_cfg = SeedVR2Config(
+                model=config.seedvr2_model,
+                target_resolution=config.seedvr2_target_resolution,
+                color_correction=config.seedvr2_color_correction,
+                block_swap=config.seedvr2_block_swap,
+            )
+            validate_seedvr2_environment(seedvr2_cfg)
 
             for preset in list(omniroam_frames_by_traj.keys()):
                 report(f"upscale_{preset}", 35)
 
-                # Find the generated video for this trajectory
                 traj_dir = work_dir / preset
-                logger.info(f"[Stage 3] Looking for video in {traj_dir}")
                 videos = list(traj_dir.rglob("generated.mp4"))
                 if not videos:
                     logger.warning(f"[Stage 3] No video found for preset={preset}, skipping upscale")
@@ -390,13 +394,12 @@ def refine_splat_v2(
                 upscaled_video = str(videos[0].parent / "generated_upscaled.mp4")
                 logger.info(f"[Stage 3] Upscaling {src_video}")
 
-                run_seedvr2_upscale(
+                seedvr2_upscale_video(
                     video_path=src_video,
                     output_path=upscaled_video,
-                    config=config,
+                    config=seedvr2_cfg,
                 )
 
-                # Re-extract frames from the upscaled video
                 upscaled_frames = extract_video_frames(upscaled_video)
                 if upscaled_frames:
                     logger.info(f"[Stage 3] Upscaled {preset}: {len(upscaled_frames)} frames "
@@ -406,7 +409,7 @@ def refine_splat_v2(
                     logger.warning(f"[Stage 3] Failed to extract upscaled frames for {preset}")
         except Exception as e:
             logger.error(f"[Stage 3] SeedVR2 upscale FAILED: {e}", exc_info=True)
-            raise  # Don't silently skip upscale — let the caller know
+            raise
 
     elif config.upscale_backend != "none":
         logger.warning(f"[Stage 3] Unknown upscale backend: {config.upscale_backend}")
@@ -566,12 +569,14 @@ def refine_splat_v2(
                 cam.position = cam.position * scale_factor
 
     # Run distillation with tier-1 (cubemap) + tier-2 (OmniRoam) views
+    # protect_original_count tells the distiller to freeze original Gaussians
+    # and only compute tier-2 loss in hole regions
     total_iters = 0
     if len(tier2_images) > 0:
         logger.info(f"[Stage 5] Distilling with {len(cubemap_faces)} tier-1 + "
-                    f"{len(tier2_images)} tier-2 views")
+                    f"{len(tier2_images)} tier-2 views "
+                    f"(protecting {initial_gaussian_count} original Gaussians)")
 
-        # Combine tier-1 and tier-2 as repaired + original
         gaussians = distill_to_gaussians(
             gaussians=gaussians,
             repaired_images=tier2_images,
@@ -582,6 +587,7 @@ def refine_splat_v2(
             densify_grad_threshold=config.densify_grad_threshold,
             iters_per_view=config.iters_per_view,
             kf_iters=config.kf_iters,
+            protect_original_count=initial_gaussian_count,
         )
         total_iters = config.iters_per_view * len(tier2_images) + config.kf_iters
     else:
