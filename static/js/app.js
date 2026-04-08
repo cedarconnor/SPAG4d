@@ -27,7 +27,10 @@ class SPAG4DApp {
         this.gpuStatus = document.getElementById('gpu-status');
 
         // Parameters
-        this.depthModelInput = document.getElementById('depth-model');
+        this.generatorInput = document.getElementById('generator');
+        this.sideCountInput = document.getElementById('side-count');
+        this.seedvr2UpscaleInput = document.getElementById('seedvr2-upscale');
+        this.sharp360Settings = document.getElementById('sharp360-settings');
 
         this.strideInput = document.getElementById('stride');
         this.depthMinInput = document.getElementById('depth-min');
@@ -44,6 +47,7 @@ class SPAG4DApp {
         this.fileInput.addEventListener('change', (e) => this.handleFileSelect(e));
         this.convertBtn.addEventListener('click', () => this.startConversion());
         this.downloadPlyBtn.addEventListener('click', () => this.downloadFile());
+        this.generatorInput.addEventListener('change', () => this.updateGeneratorUI());
 
         // Reset View Button
         const resetBtn = document.getElementById('reset-view-btn');
@@ -139,6 +143,11 @@ class SPAG4DApp {
         this.preloadTestImage();
     }
 
+    updateGeneratorUI() {
+        const isSharp = this.generatorInput.value === 'sharp360';
+        this.sharp360Settings.style.display = isSharp ? '' : 'none';
+    }
+
     ensureViewer() {
         if (!this.viewer) {
             const splatContainer = document.getElementById('splat-viewer');
@@ -225,8 +234,11 @@ class SPAG4DApp {
         const formData = new FormData();
         formData.append('file', this.currentFile);
 
-        const params = new URLSearchParams({
-            depth_model: this.depthModelInput.value,
+        const generator = this.generatorInput.value;
+        const isSharp = generator === 'sharp360';
+
+        const paramObj = {
+            generator,
             stride: this.strideInput.value,
             depth_min: this.depthMinInput.value,
             depth_max: this.depthMaxInput.value,
@@ -235,7 +247,17 @@ class SPAG4DApp {
             grazing_angle: document.getElementById('grazing-angle')?.value || '90',
             sparse_pruning: document.getElementById('sparse-pruning')?.value || '0',
             global_scale: this.globalScaleInput.value,
-        });
+        };
+
+        if (isSharp) {
+            paramObj.side_count = this.sideCountInput.value;
+            paramObj.seedvr2_upscale = this.seedvr2UpscaleInput.checked ? 'true' : 'false';
+        } else {
+            // Pass depth_model for backward compat — da360/dap map directly
+            paramObj.depth_model = generator;
+        }
+
+        const params = new URLSearchParams(paramObj);
 
         try {
             const response = await fetch(`/api/convert?${params}`, {

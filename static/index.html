@@ -100,9 +100,10 @@
 
                 <h3>Conversion Parameters</h3>
                 <dl class="help-params">
-                    <dt>Depth Model</dt>
+                    <dt>Generator</dt>
                     <dd><strong>DA360</strong> (default) = scale-invariant disparity with 360° padding.
-                        <strong>DAP</strong> = metric depth for panoramas.</dd>
+                        <strong>DAP</strong> = metric depth for panoramas.
+                        <strong>SHARP 360</strong> = per-face ML prediction for higher quality (slower).</dd>
 
                     <dt>Stride</dt>
                     <dd>Pixel stride for Gaussian generation. 1 = max quality, 2 = balanced (default), 4 = fast preview.</dd>
@@ -169,13 +170,31 @@
 
                 <!-- Parameters -->
                 <div class="params-row">
-                    <div class="param-group"
-                        title="Depth estimation model. DAP = metric depth for 360°. DA360 = circular padding DPT.">
-                        <label for="depth-model">Depth Model</label>
-                        <select id="depth-model" style="width: 85px;">
-                            <option value="dap">DAP</option>
+                    <div class="field" style="min-width: 100px;"
+                        title="Splat generator. DA360/DAP = depth-based SPAG. SHARP 360 = per-face ML prediction.">
+                        <label for="generator">Generator</label>
+                        <select id="generator" style="width: 120px;">
                             <option value="da360" selected>DA360</option>
+                            <option value="dap">DAP</option>
+                            <option value="sharp360">SHARP 360</option>
                         </select>
+                    </div>
+
+                    <div id="sharp360-settings" style="display:none;">
+                        <div class="field" style="min-width: 80px;">
+                            <label for="side-count">Sides</label>
+                            <select id="side-count" style="width: 60px;">
+                                <option value="4">4</option>
+                                <option value="6" selected>6</option>
+                                <option value="8">8</option>
+                                <option value="10">10</option>
+                                <option value="12">12</option>
+                            </select>
+                        </div>
+                        <div class="field" style="min-width: 100px;">
+                            <label for="seedvr2-upscale">SeedVR2</label>
+                            <input type="checkbox" id="seedvr2-upscale">
+                        </div>
                     </div>
 
                     <div class="param-group"
