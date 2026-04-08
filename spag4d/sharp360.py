@@ -102,8 +102,9 @@ def make_horizon_view(index: int, side_count: int) -> FaceOrientation:
         math.cos(azimuth_rad),
     ], dtype=np.float64)
 
-    # "Down" is always world-down for horizon views
-    down = np.array([0.0, -1.0, 0.0], dtype=np.float64)
+    # Camera Y-axis points downward in image space.
+    # SHARP convention: down = +Y (matching Apple's ml-sharp and SHARP_360_to_Splat)
+    down = np.array([0.0, 1.0, 0.0], dtype=np.float64)
 
     # Right completes the right-hand system: right = forward x down
     right = np.cross(forward, down)
