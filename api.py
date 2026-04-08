@@ -213,6 +213,9 @@ async def convert_panorama(
     grazing_angle: float = Query(90.0, ge=30.0, le=90.0),
     sparse_pruning: float = Query(0.0, ge=0.0, le=1.0),
     global_scale: float = Query(1.0, ge=0.1, le=10.0),
+    generator: Optional[str] = Query(None, pattern="^(da360|dap|sharp360)$"),
+    side_count: int = Query(6, ge=2, le=12),
+    seedvr2_upscale: bool = Query(False),
 ):
     """Convert uploaded panorama to Gaussian splat PLY."""
     if depth_min is not None and depth_max is not None and depth_min >= depth_max:
@@ -245,6 +248,9 @@ async def convert_panorama(
         "grazing_angle": grazing_angle,
         "sparse_pruning": sparse_pruning,
         "global_scale": global_scale,
+        "generator": generator,
+        "side_count": side_count,
+        "seedvr2_upscale": seedvr2_upscale,
     }
 
     suffix = Path(file.filename).suffix if file.filename else '.jpg'
@@ -267,6 +273,9 @@ async def convert_panorama(
         grazing_angle=grazing_angle,
         sparse_pruning=sparse_pruning,
         global_scale=global_scale,
+        generator=generator,
+        side_count=side_count,
+        seedvr2_upscale=seedvr2_upscale,
     ))
 
     return JSONResponse({
@@ -287,6 +296,9 @@ async def process_job(
     grazing_angle: float = 90.0,
     sparse_pruning: float = 0.0,
     global_scale: float = 1.0,
+    generator: Optional[str] = None,
+    side_count: int = 6,
+    seedvr2_upscale: bool = False,
 ):
     """Process conversion job with GPU semaphore."""
     try:
@@ -310,6 +322,9 @@ async def process_job(
                 depth_model=depth_model,
                 depth_preview_path=str(job.depth_preview_path),
                 depth_npy_path=str(job.depth_npy_path),
+                generator=generator,
+                side_count=side_count,
+                seedvr2_upscale=seedvr2_upscale,
             )
 
             job.result = result
