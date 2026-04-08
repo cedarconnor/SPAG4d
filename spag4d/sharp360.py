@@ -102,8 +102,9 @@ def make_horizon_view(index: int, side_count: int) -> FaceOrientation:
         math.cos(azimuth_rad),
     ], dtype=np.float64)
 
-    # "Down" is always world-down for horizon views
-    down = np.array([0.0, -1.0, 0.0], dtype=np.float64)
+    # Camera Y-axis points downward in image space.
+    # SHARP convention: down = +Y (matching Apple's ml-sharp and SHARP_360_to_Splat)
+    down = np.array([0.0, 1.0, 0.0], dtype=np.float64)
 
     # Right completes the right-hand system: right = forward x down
     right = np.cross(forward, down)
@@ -591,7 +592,11 @@ def predict_da360_disparity(
     panorama: np.ndarray,
     device: torch.device,
 ) -> np.ndarray:
-    """Run DA360 depth estimation and return the disparity map.
+    """Run DA360 and return **raw disparity** (not inverted depth).
+
+    The DA360 model outputs scale-invariant disparity where higher values
+    mean closer objects.  The SHARP alignment function expects this raw
+    disparity — not the depth-converted output from ``DA360Model.predict()``.
 
     Args:
         panorama: (H, W, 3) uint8 ERP image.
@@ -600,18 +605,61 @@ def predict_da360_disparity(
     Returns:
         (H, W) float32 disparity map (higher = closer).
     """
-    from .da360_model import DA360Model
+    import torch.nn.functional as F
+    from .da360_model import DA360Model, DA360_INPUT_H, DA360_INPUT_W
 
     LOGGER.info("Loading DA360 model...")
-    model = DA360Model.load(device=device)
+    da360_model = DA360Model.load(device=device)
 
-    image_tensor = torch.from_numpy(panorama).to(device)  # uint8 (H, W, 3)
+    # Prepare input — match DA360Model.predict() preprocessing
+    image_tensor = torch.from_numpy(panorama.copy()).to(device)
+    if image_tensor.dtype == torch.uint8:
+        image_tensor = image_tensor.float() / 255.0
+    if image_tensor.dim() == 3:
+        image_tensor = image_tensor.permute(2, 0, 1).unsqueeze(0)
+
+    H, W = panorama.shape[:2]
+
     LOGGER.info("Running DA360 depth prediction...")
-    depth, _ = model.predict(image_tensor)
+    with torch.inference_mode():
+        x = F.interpolate(
+            image_tensor,
+            size=(DA360_INPUT_H, DA360_INPUT_W),
+            mode="bilinear",
+            align_corners=True,
+        )
+        output = da360_model.model(x)
 
-    # Convert depth to disparity: disparity = 1 / depth
-    disparity = 1.0 / depth.clamp(min=1e-6)
-    return disparity.cpu().numpy().astype(np.float32)
+    # Extract raw disparity
+    if isinstance(output, dict):
+        disparity = output.get("pred_disp", next(iter(output.values())))
+    elif isinstance(output, (tuple, list)):
+        disparity = output[0]
+    else:
+        disparity = output
+
+    if disparity.dim() == 4:
+        disparity = disparity.squeeze(1)
+    if disparity.dim() == 3:
+        disparity = disparity.squeeze(0)
+
+    disparity = disparity.abs().clamp(min=1e-6)
+
+    # Upsample to panorama resolution
+    if disparity.shape[-2] != H or disparity.shape[-1] != W:
+        disparity = F.interpolate(
+            disparity.unsqueeze(0).unsqueeze(0),
+            size=(H, W),
+            mode="bilinear",
+            align_corners=True,
+        ).squeeze()
+
+    result = disparity.float().cpu().numpy()
+    LOGGER.info(
+        "DA360 disparity: min=%.4f, max=%.4f, median=%.4f",
+        float(result.min()), float(result.max()), float(np.median(result)),
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------
