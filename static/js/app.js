@@ -27,7 +27,10 @@ class SPAG4DApp {
         this.gpuStatus = document.getElementById('gpu-status');
 
         // Parameters
-        this.depthModelInput = document.getElementById('depth-model');
+        this.generatorInput = document.getElementById('generator');
+        this.sideCountInput = document.getElementById('side-count');
+        this.seedvr2UpscaleInput = document.getElementById('seedvr2-upscale');
+        this.sharp360Settings = document.getElementById('sharp360-settings');
 
         this.strideInput = document.getElementById('stride');
         this.depthMinInput = document.getElementById('depth-min');
@@ -44,6 +47,7 @@ class SPAG4DApp {
         this.fileInput.addEventListener('change', (e) => this.handleFileSelect(e));
         this.convertBtn.addEventListener('click', () => this.startConversion());
         this.downloadPlyBtn.addEventListener('click', () => this.downloadFile());
+        this.generatorInput.addEventListener('change', () => this.updateGeneratorUI());
 
         // Reset View Button
         const resetBtn = document.getElementById('reset-view-btn');
@@ -96,6 +100,21 @@ class SPAG4DApp {
         if (downloadRefinedBtn) {
             downloadRefinedBtn.addEventListener('click', () => this.downloadRefinedFile());
         }
+        // Backend toggle — show/hide param panels
+        const backendSelect = document.getElementById('refine-backend');
+        if (backendSelect) {
+            backendSelect.addEventListener('change', (e) => {
+                const gsParams = document.getElementById('gsfix3d-params');
+                const omniParams = document.getElementById('omniroam-params');
+                if (e.target.value === 'omniroam') {
+                    if (gsParams) gsParams.style.display = 'none';
+                    if (omniParams) omniParams.style.display = '';
+                } else {
+                    if (gsParams) gsParams.style.display = '';
+                    if (omniParams) omniParams.style.display = 'none';
+                }
+            });
+        }
 
         // Diagnostics gallery
         const diagBtn = document.getElementById('show-diagnostics-btn');
@@ -122,6 +141,11 @@ class SPAG4DApp {
 
         // Preload test image
         this.preloadTestImage();
+    }
+
+    updateGeneratorUI() {
+        const isSharp = this.generatorInput.value === 'sharp360';
+        this.sharp360Settings.style.display = isSharp ? '' : 'none';
     }
 
     ensureViewer() {
@@ -210,8 +234,11 @@ class SPAG4DApp {
         const formData = new FormData();
         formData.append('file', this.currentFile);
 
-        const params = new URLSearchParams({
-            depth_model: this.depthModelInput.value,
+        const generator = this.generatorInput.value;
+        const isSharp = generator === 'sharp360';
+
+        const paramObj = {
+            generator,
             stride: this.strideInput.value,
             depth_min: this.depthMinInput.value,
             depth_max: this.depthMaxInput.value,
@@ -220,7 +247,17 @@ class SPAG4DApp {
             grazing_angle: document.getElementById('grazing-angle')?.value || '90',
             sparse_pruning: document.getElementById('sparse-pruning')?.value || '0',
             global_scale: this.globalScaleInput.value,
-        });
+        };
+
+        if (isSharp) {
+            paramObj.side_count = this.sideCountInput.value;
+            paramObj.seedvr2_upscale = this.seedvr2UpscaleInput.checked ? 'true' : 'false';
+        } else {
+            // Pass depth_model for backward compat — da360/dap map directly
+            paramObj.depth_model = generator;
+        }
+
+        const params = new URLSearchParams(paramObj);
 
         try {
             const response = await fetch(`/api/convert?${params}`, {
@@ -362,21 +399,36 @@ class SPAG4DApp {
         const refineBtn = document.getElementById('refine-btn');
         if (refineBtn) refineBtn.disabled = true;
 
-        const params = new URLSearchParams({
-            job_id: this.currentJobId,
-            num_cameras: document.getElementById('num-cameras')?.value || '36',
-            max_rounds: document.getElementById('max-rounds')?.value || '3',
-            finetune_steps: document.getElementById('finetune-steps')?.value || '500',
-        });
+        const backend = document.getElementById('refine-backend')?.value || 'gsfix3d';
+        let endpoint, params;
+
+        if (backend === 'omniroam') {
+            params = new URLSearchParams({
+                job_id: this.currentJobId,
+                max_rounds: document.getElementById('max-rounds-v2')?.value || '3',
+                trajectory_mode: document.getElementById('trajectory-mode')?.value || 'auto',
+                tier2_weight: document.getElementById('tier2-weight')?.value || '0.20',
+                upscale_backend: document.getElementById('upscale-backend')?.value || 'none',
+            });
+            endpoint = '/api/refine_v2';
+        } else {
+            params = new URLSearchParams({
+                job_id: this.currentJobId,
+                num_cameras: document.getElementById('num-cameras')?.value || '36',
+                max_rounds: document.getElementById('max-rounds')?.value || '3',
+                finetune_steps: document.getElementById('finetune-steps')?.value || '500',
+            });
+            endpoint = '/api/refine';
+        }
 
         const refineStatus = document.getElementById('refine-status');
         if (refineStatus) refineStatus.style.display = '';
-        this.setRefineStatus('Starting refinement...', 0);
+        this.setRefineStatus(`Starting ${backend === 'omniroam' ? 'OmniRoam' : 'GSFix3D'} refinement...`, 0);
         const diagBtn = document.getElementById('show-diagnostics-btn');
         if (diagBtn) diagBtn.disabled = false;
 
         try {
-            const response = await fetch(`/api/refine?${params}`, { method: 'POST' });
+            const response = await fetch(`${endpoint}?${params}`, { method: 'POST' });
             if (!response.ok) {
                 const err = await response.json();
                 throw new Error(err.detail || 'Refinement failed to start');
@@ -399,12 +451,23 @@ class SPAG4DApp {
         if (!this.currentRefineId) return;
 
         const stageLabels = {
+            // GSFix3D stages
             'camera_rig': 'Generating cameras',
             'mesh_extract': 'Extracting mesh',
             'finetune': 'Adapting to scene',
             'render_holes': 'Detecting holes',
             'gsfixer_inference': 'Repairing holes',
             'distill': 'Optimizing 3D',
+            // OmniRoam v2 stages
+            'load': 'Loading splat',
+            'gap_analysis': 'Analyzing gaps',
+            'omniroam_generate': 'Generating views (OmniRoam)',
+            'view_selection': 'Selecting views',
+            'gap_seeding': 'Seeding gap regions',
+            'upscale': 'Upscaling video (SeedVR2)',
+            'optimize': 'Optimizing (tier-1 + tier-2)',
+            'validate': 'Validating results',
+            'done': 'Complete',
         };
 
         try {

@@ -32,7 +32,7 @@ from spag4d import SPAG4D, ConversionResult
 # Store outputs in project directory (survives temp cleanup and reboots)
 OUTPUT_ROOT = Path(__file__).resolve().parent / "output"
 TEMP_DIR = OUTPUT_ROOT / "jobs"
-JOB_TTL_SECONDS = 30 * 60  # 30 minutes
+JOB_TTL_SECONDS = 120 * 60  # 2 hours (OmniRoam + SeedVR2 can take 40+ min)
 MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
 GPU_SEMAPHORE_LIMIT = 1
 
@@ -157,9 +157,23 @@ async def run_cleanup():
                 if p:
                     active_paths.add(str(p))
 
+    # Also protect files belonging to active refine jobs
+    active_refine_prefixes = set()
+    for rj in refine_jobs.values():
+        if rj.status in ("queued", "processing"):
+            active_refine_prefixes.add(rj.refine_id)
+            active_refine_prefixes.add(rj.source_job_id)
+
     try:
         for f in TEMP_DIR.iterdir():
             if str(f) in active_paths:
+                continue
+            # Skip any file/dir associated with an active refine job
+            fname = f.name
+            if any(prefix in fname for prefix in active_refine_prefixes):
+                continue
+            # Skip OmniRoam work directories while any refine job is active
+            if fname.startswith(("_omniroam_work", "_refine_v2")) and active_refine_prefixes:
                 continue
             if now - f.stat().st_mtime > JOB_TTL_SECONDS:
                 if f.is_dir():
@@ -199,6 +213,9 @@ async def convert_panorama(
     grazing_angle: float = Query(90.0, ge=30.0, le=90.0),
     sparse_pruning: float = Query(0.0, ge=0.0, le=1.0),
     global_scale: float = Query(1.0, ge=0.1, le=10.0),
+    generator: Optional[str] = Query(None, pattern="^(da360|dap|sharp360)$"),
+    side_count: int = Query(6, ge=2, le=12),
+    seedvr2_upscale: bool = Query(False),
 ):
     """Convert uploaded panorama to Gaussian splat PLY."""
     if depth_min is not None and depth_max is not None and depth_min >= depth_max:
@@ -231,6 +248,9 @@ async def convert_panorama(
         "grazing_angle": grazing_angle,
         "sparse_pruning": sparse_pruning,
         "global_scale": global_scale,
+        "generator": generator,
+        "side_count": side_count,
+        "seedvr2_upscale": seedvr2_upscale,
     }
 
     suffix = Path(file.filename).suffix if file.filename else '.jpg'
@@ -253,6 +273,9 @@ async def convert_panorama(
         grazing_angle=grazing_angle,
         sparse_pruning=sparse_pruning,
         global_scale=global_scale,
+        generator=generator,
+        side_count=side_count,
+        seedvr2_upscale=seedvr2_upscale,
     ))
 
     return JSONResponse({
@@ -273,6 +296,9 @@ async def process_job(
     grazing_angle: float = 90.0,
     sparse_pruning: float = 0.0,
     global_scale: float = 1.0,
+    generator: Optional[str] = None,
+    side_count: int = 6,
+    seedvr2_upscale: bool = False,
 ):
     """Process conversion job with GPU semaphore."""
     try:
@@ -296,6 +322,9 @@ async def process_job(
                 depth_model=depth_model,
                 depth_preview_path=str(job.depth_preview_path),
                 depth_npy_path=str(job.depth_npy_path),
+                generator=generator,
+                side_count=side_count,
+                seedvr2_upscale=seedvr2_upscale,
             )
 
             job.result = result
@@ -498,6 +527,127 @@ def _run_refinement(source_job: JobInfo, refine_job: RefineJobInfo) -> dict:
         "final_count": result["gaussians_count"],
         "iterations_used": result["iterations_used"],
         "total_time": result["total_time"],
+    }
+
+
+@app.post("/api/refine_v2")
+async def start_refinement_v2(
+    job_id: str = Query(..., description="Source conversion job ID"),
+    max_rounds: int = Query(3, ge=1, le=5),
+    trajectory_mode: str = Query("auto", description="auto | all | forward,left,..."),
+    tier2_weight: float = Query(0.20, ge=0.05, le=0.5),
+    upscale_backend: str = Query("none", description="none | seedvr2"),
+):
+    """Start OmniRoam-based refinement (v2) on an existing conversion job."""
+    if job_id not in jobs:
+        raise HTTPException(404, "Source job not found")
+
+    job = jobs[job_id]
+    if job.status != "complete":
+        raise HTTPException(400, "Source job not complete")
+
+    if not (job.output_ply_path and job.output_ply_path.exists()):
+        raise HTTPException(400, "PLY file not found")
+    if not (job.input_path and job.input_path.exists()):
+        raise HTTPException(400, "Input panorama not found")
+    if not (job.depth_npy_path and job.depth_npy_path.exists()):
+        raise HTTPException(400, "Depth map not found")
+
+    refine_id = str(uuid.uuid4())
+    refine_job = RefineJobInfo(refine_id, job_id)
+    refine_job.params = {
+        "backend": "omniroam",
+        "max_rounds": max_rounds,
+        "trajectory_mode": trajectory_mode,
+        "tier2_weight": tier2_weight,
+        "upscale_backend": upscale_backend,
+    }
+    refine_job.output_ply_path = TEMP_DIR / f"{refine_id}_refined_v2.ply"
+    refine_job.diagnostics_dir = TEMP_DIR / f"{refine_id}_diagnostics_v2"
+    refine_jobs[refine_id] = refine_job
+
+    asyncio.create_task(process_refinement_v2(refine_job, job))
+
+    return JSONResponse({
+        "refine_job_id": refine_id,
+        "status": "queued",
+        "backend": "omniroam",
+    })
+
+
+async def process_refinement_v2(refine_job: RefineJobInfo, source_job: JobInfo):
+    """Run OmniRoam refinement pipeline in background."""
+    try:
+        async with gpu_semaphore:
+            refine_job.status = "processing"
+            refine_job.last_updated = time.time()
+
+            result = await run_in_threadpool(
+                _run_refinement_v2,
+                source_job=source_job,
+                refine_job=refine_job,
+            )
+
+            refine_job.metrics = result
+            refine_job.status = "complete"
+            refine_job.last_updated = time.time()
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        refine_job.status = "error"
+        refine_job.error = str(e)
+        refine_job.last_updated = time.time()
+
+
+def _run_refinement_v2(source_job: JobInfo, refine_job: RefineJobInfo) -> dict:
+    """Execute the OmniRoam refinement pipeline (blocking, runs in thread)."""
+    import numpy as np
+    from spag4d.refine import refine_splat_v2
+    from spag4d.refine.omniroam_config import OmniRoamConfig
+
+    params = refine_job.params
+    output_dir = refine_job.diagnostics_dir or TEMP_DIR / f"{refine_job.refine_id}_out_v2"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    depth_map = np.load(str(source_job.depth_npy_path))
+
+    # Parse trajectory_mode — could be "auto", "all", or comma-separated list
+    traj_mode = params.get("trajectory_mode", "auto")
+    if "," in traj_mode:
+        traj_mode = [t.strip() for t in traj_mode.split(",")]
+
+    config = OmniRoamConfig(
+        enabled=True,
+        max_iterations=params.get("max_rounds", 3),
+        trajectory_mode=traj_mode,
+        tier2_weight=params.get("tier2_weight", 0.20),
+        upscale_backend=params.get("upscale_backend", "none"),
+    )
+
+    def update_progress(stage, pct):
+        refine_job.stage = stage
+        refine_job.progress_pct = pct
+        refine_job.last_updated = time.time()
+
+    result = refine_splat_v2(
+        ply_path=str(source_job.output_ply_path),
+        panorama_path=str(source_job.input_path),
+        depth_map=depth_map,
+        config=config,
+        output_path=str(refine_job.output_ply_path),
+        progress_callback=update_progress,
+        diagnostics_dir=str(output_dir / "diagnostics"),
+    )
+
+    return {
+        "initial_hole_fraction": result["initial_hole_fraction"],
+        "final_hole_fraction": result["final_hole_fraction"],
+        "final_count": result["gaussians_count"],
+        "iterations_used": result["iterations_used"],
+        "total_time": result["total_time"],
+        "source_anchor_psnr": result.get("source_anchor_psnr"),
+        "backend": "omniroam",
     }
 
 

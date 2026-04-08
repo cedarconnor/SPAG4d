@@ -1,0 +1,878 @@
+"""SHARP 360 pipeline: per-face SHARP prediction with DA360 alignment.
+
+Orchestrates the full conversion of a 360 equirectangular panorama into a
+merged 3D Gaussian Splat via:
+  1. Perspective face extraction from ERP panorama
+  2. Optional SeedVR2 upscaling
+  3. DA360 disparity prediction on full panorama
+  4. Per-face SHARP Gaussian prediction
+  5. Hard Voronoi border clipping
+  6. DA360 grid-based depth alignment
+  7. World-frame rotation and merge
+  8. PLY export via SHARP's save_ply()
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+import sys
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Tuple
+
+import numpy as np
+import torch
+
+# SHARP vendored source path setup
+_SHARP_SRC = str(Path(__file__).resolve().parent / "sharp_arch" / "ml-sharp" / "src")
+if _SHARP_SRC not in sys.path:
+    sys.path.insert(0, _SHARP_SRC)
+
+LOGGER = logging.getLogger(__name__)
+
+PI = math.pi
+TWO_PI = 2.0 * PI
+
+# ---------------------------------------------------------------------------
+# Data classes
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class FaceOrientation:
+    """Orientation of a single perspective view extracted from an ERP panorama.
+
+    Axes follow right-hand convention:
+      - right:   positive-X of the view
+      - down:    positive-Y of the view
+      - forward: positive-Z (into the scene)
+    """
+
+    name: str
+    right: np.ndarray    # (3,)
+    down: np.ndarray     # (3,)
+    forward: np.ndarray  # (3,)
+
+    @property
+    def rotation_matrix(self) -> np.ndarray:
+        """3x3 rotation from view-local to world coordinates.
+
+        Columns are the view axes expressed in the world frame:
+          R = [right | down | forward]
+
+        So ``world_point = R @ view_point``.
+        """
+        return np.column_stack([self.right, self.down, self.forward])
+
+
+@dataclass(frozen=True)
+class ExtractionLayout:
+    """Describes a set of perspective views to extract from an ERP panorama."""
+
+    name: str
+    views: List[FaceOrientation]
+    focal_px: float      # horizontal focal length in pixels
+    focal_y_px: float    # vertical focal length in pixels
+    image_width: int
+    image_height: int
+
+
+# ---------------------------------------------------------------------------
+# View geometry helpers
+# ---------------------------------------------------------------------------
+
+def make_horizon_view(index: int, side_count: int) -> FaceOrientation:
+    """Create a single horizon-ring FaceOrientation at the given index.
+
+    The view faces outward along the horizon at azimuth
+    ``index * (360 / side_count)`` degrees, measured from +Z towards +X.
+
+    Naming convention:
+      - 2 sides: "front", "back"
+      - 4 sides: "front", "right", "back", "left"
+      - otherwise: "side_01", "side_02", ...
+    """
+    azimuth_rad = index * TWO_PI / side_count
+
+    # Forward direction on the horizon (Y = 0)
+    forward = np.array([
+        math.sin(azimuth_rad),
+        0.0,
+        math.cos(azimuth_rad),
+    ], dtype=np.float64)
+
+    # "Down" is always world-down for horizon views
+    down = np.array([0.0, -1.0, 0.0], dtype=np.float64)
+
+    # Right completes the right-hand system: right = forward x down
+    right = np.cross(forward, down)
+    right = right / np.linalg.norm(right)
+
+    # Name
+    if side_count == 2:
+        names = ["front", "back"]
+        name = names[index]
+    elif side_count == 4:
+        names = ["front", "right", "back", "left"]
+        name = names[index]
+    else:
+        name = f"side_{index + 1:02d}"
+
+    return FaceOrientation(name=name, right=right, down=down, forward=forward)
+
+
+def build_extraction_layout(
+    face_size: int,
+    panorama_height: int,
+    side_count: int = 6,
+    overlap_degrees: float = 10.0,
+) -> ExtractionLayout:
+    """Build an extraction layout for *side_count* horizon views.
+
+    Args:
+        face_size: Width and height of each extracted perspective face in pixels.
+        panorama_height: Height of the input ERP panorama in pixels.
+        side_count: Number of horizon views (default 6).
+        overlap_degrees: Extra FOV overlap per side in degrees (default 10).
+
+    Returns:
+        An ExtractionLayout with the computed views and intrinsics.
+    """
+    base_fov_deg = 360.0 / side_count
+    total_fov_deg = base_fov_deg + overlap_degrees
+    total_fov_rad = math.radians(total_fov_deg)
+
+    # Focal length derived from horizontal FOV and face width
+    focal_px = (face_size / 2.0) / math.tan(total_fov_rad / 2.0)
+
+    # Vertical FOV: the face is square, so vertical focal = horizontal focal
+    # (square pixels).  We keep focal_y_px equal to focal_px.
+    focal_y_px = focal_px
+
+    views = [make_horizon_view(i, side_count) for i in range(side_count)]
+
+    name = f"horizon_{side_count}_{face_size}px"
+    return ExtractionLayout(
+        name=name,
+        views=views,
+        focal_px=focal_px,
+        focal_y_px=focal_y_px,
+        image_width=face_size,
+        image_height=face_size,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bilinear sampling with ERP horizontal wrap
+# ---------------------------------------------------------------------------
+
+def bilinear_sample(
+    image: np.ndarray,
+    sample_x: np.ndarray,
+    sample_y: np.ndarray,
+) -> np.ndarray:
+    """Bilinear-sample an RGB image with horizontal wrap.
+
+    Args:
+        image: (H, W, C) uint8 or float array.
+        sample_x: (...) float pixel x coordinates (0-based).
+        sample_y: (...) float pixel y coordinates (0-based).
+
+    Returns:
+        (..., C) sampled values, same dtype as input.
+    """
+    H, W = image.shape[:2]
+    C = image.shape[2] if image.ndim == 3 else 1
+    img = image.astype(np.float64).reshape(H, W, C)
+
+    x0 = np.floor(sample_x).astype(np.int64)
+    y0 = np.floor(sample_y).astype(np.int64)
+    x1 = x0 + 1
+    y1 = y0 + 1
+
+    # Fractional parts
+    fx = (sample_x - x0).astype(np.float64)
+    fy = (sample_y - y0).astype(np.float64)
+
+    # Horizontal wrap, vertical clamp
+    x0w = x0 % W
+    x1w = x1 % W
+    y0c = np.clip(y0, 0, H - 1)
+    y1c = np.clip(y1, 0, H - 1)
+
+    # Four corners
+    v00 = img[y0c, x0w]
+    v10 = img[y0c, x1w]
+    v01 = img[y1c, x0w]
+    v11 = img[y1c, x1w]
+
+    # Bilinear weights
+    w00 = ((1.0 - fx) * (1.0 - fy))[..., None]
+    w10 = (fx * (1.0 - fy))[..., None]
+    w01 = ((1.0 - fx) * fy)[..., None]
+    w11 = (fx * fy)[..., None]
+
+    result = v00 * w00 + v10 * w10 + v01 * w01 + v11 * w11
+
+    if image.dtype == np.uint8:
+        result = np.clip(result + 0.5, 0, 255).astype(np.uint8)
+
+    if image.ndim == 2:
+        result = result[..., 0]
+
+    return result
+
+
+def bilinear_sample_scalar(
+    image: np.ndarray,
+    sample_x: np.ndarray,
+    sample_y: np.ndarray,
+) -> np.ndarray:
+    """Bilinear-sample a scalar (2-D) map with horizontal wrap.
+
+    Args:
+        image: (H, W) float array.
+        sample_x: (...) float pixel x coordinates.
+        sample_y: (...) float pixel y coordinates.
+
+    Returns:
+        (...) sampled values.
+    """
+    H, W = image.shape[:2]
+
+    x0 = np.floor(sample_x).astype(np.int64)
+    y0 = np.floor(sample_y).astype(np.int64)
+    x1 = x0 + 1
+    y1 = y0 + 1
+
+    fx = (sample_x - x0).astype(np.float64)
+    fy = (sample_y - y0).astype(np.float64)
+
+    x0w = x0 % W
+    x1w = x1 % W
+    y0c = np.clip(y0, 0, H - 1)
+    y1c = np.clip(y1, 0, H - 1)
+
+    v00 = image[y0c, x0w].astype(np.float64)
+    v10 = image[y0c, x1w].astype(np.float64)
+    v01 = image[y1c, x0w].astype(np.float64)
+    v11 = image[y1c, x1w].astype(np.float64)
+
+    return (
+        v00 * (1.0 - fx) * (1.0 - fy)
+        + v10 * fx * (1.0 - fy)
+        + v01 * (1.0 - fx) * fy
+        + v11 * fx * fy
+    )
+
+
+# ---------------------------------------------------------------------------
+# Perspective extraction from ERP
+# ---------------------------------------------------------------------------
+
+def _pixel_ray_directions(
+    image_width: int,
+    image_height: int,
+    focal_x_px: float,
+    focal_y_px: float,
+    view: FaceOrientation,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Compute world-frame ray directions for every pixel in a perspective view.
+
+    Returns (world_x, world_y, world_z) each of shape (image_height, image_width).
+    """
+    # Pixel grid — centre of each pixel
+    u = np.arange(image_width, dtype=np.float64) + 0.5
+    v = np.arange(image_height, dtype=np.float64) + 0.5
+    uu, vv = np.meshgrid(u, v, indexing="xy")
+
+    # View-local ray (pinhole camera, origin at image centre)
+    cx = image_width / 2.0
+    cy = image_height / 2.0
+    local_x = (uu - cx) / focal_x_px
+    local_y = (vv - cy) / focal_y_px
+    local_z = np.ones_like(uu)
+
+    # Rotate to world frame
+    R = view.rotation_matrix  # 3x3, columns = [right, down, forward]
+    world_x = R[0, 0] * local_x + R[0, 1] * local_y + R[0, 2] * local_z
+    world_y = R[1, 0] * local_x + R[1, 1] * local_y + R[1, 2] * local_z
+    world_z = R[2, 0] * local_x + R[2, 1] * local_y + R[2, 2] * local_z
+
+    return world_x, world_y, world_z
+
+
+def _world_to_erp_pixels(
+    world_x: np.ndarray,
+    world_y: np.ndarray,
+    world_z: np.ndarray,
+    erp_width: int,
+    erp_height: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Convert world-frame direction vectors to ERP pixel coordinates.
+
+    Uses the convention from SHARP_360_to_Splat:
+      longitude = atan2(x, z)
+      latitude  = asin(y / ||dir||)
+    """
+    norm = np.sqrt(world_x ** 2 + world_y ** 2 + world_z ** 2)
+    norm = np.maximum(norm, 1e-12)
+
+    longitude = np.arctan2(world_x, world_z)                  # (-pi, pi]
+    latitude = np.arcsin(np.clip(world_y / norm, -1.0, 1.0))  # (-pi/2, pi/2)
+
+    sample_x = (longitude / TWO_PI + 0.5) * erp_width - 0.5
+    sample_y = (latitude / PI + 0.5) * erp_height - 0.5
+
+    return sample_x, sample_y
+
+
+def extract_perspective_view(
+    panorama: np.ndarray,
+    image_width: int,
+    image_height: int,
+    focal_x_px: float,
+    focal_y_px: float,
+    view: FaceOrientation,
+) -> np.ndarray:
+    """Extract a single perspective face from an ERP panorama.
+
+    Args:
+        panorama: (H, W, 3) uint8 ERP image.
+        image_width: Output face width in pixels.
+        image_height: Output face height in pixels.
+        focal_x_px: Horizontal focal length in pixels.
+        focal_y_px: Vertical focal length in pixels.
+        view: FaceOrientation describing the view direction.
+
+    Returns:
+        (image_height, image_width, 3) uint8 face image.
+    """
+    erp_h, erp_w = panorama.shape[:2]
+    wx, wy, wz = _pixel_ray_directions(image_width, image_height, focal_x_px, focal_y_px, view)
+    sx, sy = _world_to_erp_pixels(wx, wy, wz, erp_w, erp_h)
+    return bilinear_sample(panorama, sx, sy)
+
+
+def extract_perspective_views(
+    layout: ExtractionLayout,
+    panorama: np.ndarray,
+) -> Dict[str, np.ndarray]:
+    """Extract all perspective faces from an ERP panorama.
+
+    Returns:
+        Dict mapping view name to (H, W, 3) uint8 face image.
+    """
+    faces: Dict[str, np.ndarray] = {}
+    for view in layout.views:
+        face = extract_perspective_view(
+            panorama,
+            layout.image_width,
+            layout.image_height,
+            layout.focal_px,
+            layout.focal_y_px,
+            view,
+        )
+        faces[view.name] = face
+    return faces
+
+
+def extract_perspective_scalar_view(
+    scalar_map: np.ndarray,
+    image_width: int,
+    image_height: int,
+    focal_x_px: float,
+    focal_y_px: float,
+    view: FaceOrientation,
+) -> np.ndarray:
+    """Extract a single perspective scalar map from an ERP scalar map.
+
+    Args:
+        scalar_map: (H, W) float scalar ERP map (e.g. disparity).
+        image_width: Output width.
+        image_height: Output height.
+        focal_x_px: Horizontal focal length.
+        focal_y_px: Vertical focal length.
+        view: FaceOrientation.
+
+    Returns:
+        (image_height, image_width) float scalar face.
+    """
+    erp_h, erp_w = scalar_map.shape[:2]
+    wx, wy, wz = _pixel_ray_directions(image_width, image_height, focal_x_px, focal_y_px, view)
+    sx, sy = _world_to_erp_pixels(wx, wy, wz, erp_w, erp_h)
+    return bilinear_sample_scalar(scalar_map, sx, sy)
+
+
+# ---------------------------------------------------------------------------
+# Gaussian operations
+# ---------------------------------------------------------------------------
+
+def filter_gaussians_by_view_border(
+    gaussians: "Gaussians3D",
+    clip_degrees: float,
+) -> "Gaussians3D":
+    """Hard Voronoi clipping: keep only Gaussians within *clip_degrees* of the
+    view's forward (+Z) axis.
+
+    The Gaussians are assumed to be in view-local coordinates (forward = +Z).
+
+    Args:
+        gaussians: Gaussians3D with tensors of shape (1, N, D).
+        clip_degrees: Half-angle in degrees for the clipping cone.
+
+    Returns:
+        Filtered Gaussians3D.
+    """
+    from sharp.utils.gaussians import Gaussians3D as _G3D
+
+    means = gaussians.mean_vectors[0]  # (N, 3)
+    # Angle from +Z axis
+    norms = torch.linalg.norm(means, dim=-1).clamp(min=1e-8)
+    cos_angle = means[:, 2] / norms  # dot with (0,0,1)
+    angle_deg = torch.acos(cos_angle.clamp(-1.0, 1.0)) * (180.0 / PI)
+
+    mask = angle_deg <= clip_degrees
+
+    return _G3D(
+        mean_vectors=gaussians.mean_vectors[:, mask],
+        singular_values=gaussians.singular_values[:, mask],
+        quaternions=gaussians.quaternions[:, mask],
+        colors=gaussians.colors[:, mask],
+        opacities=gaussians.opacities[:, mask],
+    )
+
+
+def align_gaussians_to_reference(
+    gaussians: "Gaussians3D",
+    ref_disparity_view: np.ndarray,
+    focal_x_px: float,
+    focal_y_px: float,
+    image_width: int,
+    image_height: int,
+    grid_resolution: int = 8,
+) -> "Gaussians3D":
+    """Align Gaussian depths to a DA360 reference disparity via a smooth
+    NxN grid scale field.
+
+    The Gaussians are assumed to be in view-local coordinates where the depth
+    axis is +Z.  The reference disparity is the DA360 output projected into the
+    same view.
+
+    Args:
+        gaussians: Gaussians3D (1, N, D) in view-local coordinates.
+        ref_disparity_view: (H, W) float disparity map for this view.
+        focal_x_px: Horizontal focal length.
+        focal_y_px: Vertical focal length.
+        image_width: View width in pixels.
+        image_height: View height in pixels.
+        grid_resolution: NxN grid cells for the smooth scale field.
+
+    Returns:
+        Depth-aligned Gaussians3D.
+    """
+    from sharp.utils.gaussians import Gaussians3D as _G3D
+
+    device = gaussians.mean_vectors.device
+    means = gaussians.mean_vectors[0]  # (N, 3)
+    N = means.shape[0]
+
+    if N == 0:
+        return gaussians
+
+    # Project Gaussian centres onto image plane to get pixel coords
+    depths = means[:, 2].clamp(min=1e-6)  # view-local Z depth
+    px_x = means[:, 0] / depths * focal_x_px + image_width / 2.0
+    px_y = means[:, 1] / depths * focal_y_px + image_height / 2.0
+
+    # Assign each Gaussian to a grid cell
+    cell_w = image_width / grid_resolution
+    cell_h = image_height / grid_resolution
+    gx = (px_x / cell_w).long().clamp(0, grid_resolution - 1)
+    gy = (px_y / cell_h).long().clamp(0, grid_resolution - 1)
+
+    # SHARP disparity = focal / depth  (approximate)
+    sharp_disp = focal_x_px / depths
+
+    # Sample DA360 reference disparity at Gaussian pixel locations
+    ref_disp_t = torch.from_numpy(ref_disparity_view).float().to(device)
+    # Bilinear sample from reference disparity
+    px_xi = px_x.clamp(0, image_width - 1).long()
+    px_yi = px_y.clamp(0, image_height - 1).long()
+    ref_disp_at_gauss = ref_disp_t[px_yi, px_xi]
+
+    # Compute per-cell median scale ratio: ref_disp / sharp_disp
+    scale_grid = torch.ones(grid_resolution, grid_resolution, device=device)
+    for cy_idx in range(grid_resolution):
+        for cx_idx in range(grid_resolution):
+            cell_mask = (gx == cx_idx) & (gy == cy_idx)
+            if cell_mask.sum() < 5:
+                continue
+            ratios = ref_disp_at_gauss[cell_mask] / sharp_disp[cell_mask].clamp(min=1e-8)
+            # Use log-median for robustness
+            log_ratios = torch.log(ratios.clamp(min=1e-8))
+            scale_grid[cy_idx, cx_idx] = torch.exp(log_ratios.median())
+
+    # Smooth the scale grid (simple 3x3 Gaussian blur)
+    kernel = torch.tensor(
+        [[1, 2, 1], [2, 4, 2], [1, 2, 1]], dtype=torch.float32, device=device
+    ) / 16.0
+    sg = scale_grid.unsqueeze(0).unsqueeze(0)  # (1, 1, G, G)
+    sg_padded = torch.nn.functional.pad(sg, (1, 1, 1, 1), mode="replicate")
+    sg_smooth = torch.nn.functional.conv2d(sg_padded, kernel.unsqueeze(0).unsqueeze(0))
+    scale_grid = sg_smooth.squeeze()
+
+    # Look up per-Gaussian scale from the smooth grid
+    per_gauss_scale = scale_grid[gy, gx]
+
+    # Scale depth and positions: new_depth = depth * scale_ratio
+    # Since disparity = f/depth, scaling disparity by ratio means:
+    # new_depth = depth / scale_ratio
+    inv_scale = 1.0 / per_gauss_scale.clamp(min=1e-4)
+
+    new_means = means.clone()
+    new_means[:, 2] = means[:, 2] * inv_scale
+    # Also scale X, Y to maintain ray direction
+    new_means[:, 0] = means[:, 0] * inv_scale
+    new_means[:, 1] = means[:, 1] * inv_scale
+
+    # Scale singular values accordingly
+    new_sv = gaussians.singular_values[0] * inv_scale.unsqueeze(-1)
+
+    return _G3D(
+        mean_vectors=new_means.unsqueeze(0),
+        singular_values=new_sv.unsqueeze(0),
+        quaternions=gaussians.quaternions,
+        colors=gaussians.colors,
+        opacities=gaussians.opacities,
+    )
+
+
+def scale_gaussians(
+    gaussians: "Gaussians3D",
+    scale_factor: float,
+) -> "Gaussians3D":
+    """Uniformly scale Gaussian positions and singular values."""
+    from sharp.utils.gaussians import Gaussians3D as _G3D
+
+    return _G3D(
+        mean_vectors=gaussians.mean_vectors * scale_factor,
+        singular_values=gaussians.singular_values * scale_factor,
+        quaternions=gaussians.quaternions,
+        colors=gaussians.colors,
+        opacities=gaussians.opacities,
+    )
+
+
+def merge_gaussians(
+    gaussians_list: List["Gaussians3D"],
+) -> "Gaussians3D":
+    """Concatenate a list of Gaussians3D into one (along N dimension).
+
+    All inputs must have batch dim 1, i.e. shape (1, N_i, D).
+    """
+    from sharp.utils.gaussians import Gaussians3D as _G3D
+
+    return _G3D(
+        mean_vectors=torch.cat([g.mean_vectors for g in gaussians_list], dim=1),
+        singular_values=torch.cat([g.singular_values for g in gaussians_list], dim=1),
+        quaternions=torch.cat([g.quaternions for g in gaussians_list], dim=1),
+        colors=torch.cat([g.colors for g in gaussians_list], dim=1),
+        opacities=torch.cat([g.opacities for g in gaussians_list], dim=1),
+    )
+
+
+# ---------------------------------------------------------------------------
+# DA360 integration
+# ---------------------------------------------------------------------------
+
+def predict_da360_disparity(
+    panorama: np.ndarray,
+    device: torch.device,
+) -> np.ndarray:
+    """Run DA360 depth estimation and return the disparity map.
+
+    Args:
+        panorama: (H, W, 3) uint8 ERP image.
+        device: Torch device.
+
+    Returns:
+        (H, W) float32 disparity map (higher = closer).
+    """
+    from .da360_model import DA360Model
+
+    LOGGER.info("Loading DA360 model...")
+    model = DA360Model.load(device=device)
+
+    image_tensor = torch.from_numpy(panorama).to(device)  # uint8 (H, W, 3)
+    LOGGER.info("Running DA360 depth prediction...")
+    depth, _ = model.predict(image_tensor)
+
+    # Convert depth to disparity: disparity = 1 / depth
+    disparity = 1.0 / depth.clamp(min=1e-6)
+    return disparity.cpu().numpy().astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# SHARP predictor loading
+# ---------------------------------------------------------------------------
+
+def _load_sharp_predictor(device: torch.device):
+    """Load the SHARP Gaussian predictor model.
+
+    Auto-downloads the checkpoint from Apple CDN if not cached.
+
+    Returns:
+        (predictor, device) tuple.
+    """
+    from sharp.models import PredictorParams, create_predictor
+    from sharp.cli.predict import DEFAULT_MODEL_URL
+
+    LOGGER.info("Loading SHARP predictor (auto-download if needed)...")
+    state_dict = torch.hub.load_state_dict_from_url(DEFAULT_MODEL_URL, progress=True)
+
+    predictor = create_predictor(PredictorParams())
+    predictor.load_state_dict(state_dict)
+    predictor.eval()
+    predictor.to(device)
+
+    return predictor
+
+
+# ---------------------------------------------------------------------------
+# Main pipeline
+# ---------------------------------------------------------------------------
+
+def convert_sharp360(
+    input_path: str,
+    output_path: str,
+    device: torch.device,
+    side_count: int = 6,
+    overlap_degrees: float = 10.0,
+    seedvr2_upscale: bool = False,
+    seedvr2_config: Optional["SeedVR2Config"] = None,
+    progress_callback: Optional[Callable[[str, int, int], None]] = None,
+) -> dict:
+    """Full SHARP 360 pipeline: ERP panorama -> merged 3DGS PLY.
+
+    Args:
+        input_path: Path to 2:1 equirectangular panorama image.
+        output_path: Path for the output .ply file.
+        device: Torch device ('cuda', 'mps', 'cpu').
+        side_count: Number of horizon views (default 6).
+        overlap_degrees: Extra FOV overlap per side in degrees.
+        seedvr2_upscale: Whether to upscale faces with SeedVR2 first.
+        seedvr2_config: SeedVR2Config (required if seedvr2_upscale=True).
+        progress_callback: Optional callback(stage_name, current, total).
+
+    Returns:
+        Dict with stats: {"num_gaussians", "num_faces", "output_path"}.
+    """
+    from PIL import Image
+    from sharp.cli.predict import predict_image
+    from sharp.utils.gaussians import Gaussians3D, apply_transform, save_ply
+
+    def _progress(stage: str, cur: int, total: int):
+        if progress_callback is not None:
+            progress_callback(stage, cur, total)
+
+    # ------------------------------------------------------------------
+    # 1. Load and validate ERP panorama
+    # ------------------------------------------------------------------
+    _progress("load", 0, 1)
+    LOGGER.info("Loading panorama: %s", input_path)
+    pil_img = Image.open(input_path).convert("RGB")
+    panorama = np.array(pil_img)
+    erp_h, erp_w = panorama.shape[:2]
+
+    if abs(erp_w / erp_h - 2.0) > 0.05:
+        raise ValueError(
+            f"Input image must be 2:1 equirectangular, got {erp_w}x{erp_h} "
+            f"(ratio {erp_w / erp_h:.2f})"
+        )
+    LOGGER.info("Panorama: %dx%d", erp_w, erp_h)
+    _progress("load", 1, 1)
+
+    # ------------------------------------------------------------------
+    # 2. Build extraction layout
+    # ------------------------------------------------------------------
+    face_size = min(erp_h, 1024)  # cap at 1024px for SHARP memory
+    layout = build_extraction_layout(
+        face_size=face_size,
+        panorama_height=erp_h,
+        side_count=side_count,
+        overlap_degrees=overlap_degrees,
+    )
+    LOGGER.info(
+        "Layout: %d views, %dx%d faces, focal=%.1f px",
+        len(layout.views), layout.image_width, layout.image_height, layout.focal_px,
+    )
+
+    # ------------------------------------------------------------------
+    # 3. Extract perspective faces
+    # ------------------------------------------------------------------
+    _progress("extract", 0, side_count)
+    faces = extract_perspective_views(layout, panorama)
+    _progress("extract", side_count, side_count)
+    LOGGER.info("Extracted %d perspective faces", len(faces))
+
+    # ------------------------------------------------------------------
+    # 4. Optional SeedVR2 upscale
+    # ------------------------------------------------------------------
+    effective_width = layout.image_width
+    effective_height = layout.image_height
+    effective_focal_x = layout.focal_px
+    effective_focal_y = layout.focal_y_px
+
+    if seedvr2_upscale:
+        from .seedvr2 import SeedVR2Config, upscale_images
+
+        if seedvr2_config is None:
+            seedvr2_config = SeedVR2Config()
+        with tempfile.TemporaryDirectory(prefix="sharp360_seedvr2_") as tmp_dir:
+            LOGGER.info("Upscaling %d faces with SeedVR2...", len(faces))
+            _progress("seedvr2", 0, side_count)
+            faces, new_w, new_h = upscale_images(faces, seedvr2_config, tmp_dir)
+            _progress("seedvr2", side_count, side_count)
+
+            # Update intrinsics for upscaled resolution
+            scale_x = new_w / effective_width
+            scale_y = new_h / effective_height
+            effective_width = new_w
+            effective_height = new_h
+            effective_focal_x *= scale_x
+            effective_focal_y *= scale_y
+            LOGGER.info(
+                "Upscaled to %dx%d, focal=(%.1f, %.1f)",
+                effective_width, effective_height, effective_focal_x, effective_focal_y,
+            )
+
+    # ------------------------------------------------------------------
+    # 5. DA360 disparity on full panorama
+    # ------------------------------------------------------------------
+    _progress("da360", 0, 1)
+    da360_disparity = predict_da360_disparity(panorama, device)
+    _progress("da360", 1, 1)
+    LOGGER.info(
+        "DA360 disparity: min=%.4f, max=%.4f, median=%.4f",
+        da360_disparity.min(), da360_disparity.max(), np.median(da360_disparity),
+    )
+
+    # ------------------------------------------------------------------
+    # 6. SHARP prediction per face
+    # ------------------------------------------------------------------
+    predictor = _load_sharp_predictor(device)
+    f_px_tuple = (effective_focal_x, effective_focal_y)
+
+    clip_degrees = 360.0 / side_count / 2.0  # Hard Voronoi half-angle
+
+    all_gaussians: List[Gaussians3D] = []
+
+    for idx, view in enumerate(layout.views):
+        _progress("sharp", idx, side_count)
+        face_name = view.name
+        face_img = faces[face_name]  # (H, W, 3) uint8
+
+        LOGGER.info("SHARP predict: face %d/%d (%s)", idx + 1, side_count, face_name)
+
+        # 6a. Run SHARP
+        gaussians = predict_image(predictor, face_img, f_px_tuple, device)
+
+        LOGGER.info(
+            "  -> %d Gaussians before clipping",
+            gaussians.mean_vectors.shape[1],
+        )
+
+        # ------------------------------------------------------------------
+        # 7. Hard Voronoi border clipping
+        # ------------------------------------------------------------------
+        gaussians = filter_gaussians_by_view_border(gaussians, clip_degrees)
+        LOGGER.info(
+            "  -> %d Gaussians after clipping (%.1f deg)",
+            gaussians.mean_vectors.shape[1], clip_degrees,
+        )
+
+        # ------------------------------------------------------------------
+        # 8. DA360 alignment
+        # ------------------------------------------------------------------
+        ref_disp_view = extract_perspective_scalar_view(
+            da360_disparity,
+            effective_width,
+            effective_height,
+            effective_focal_x,
+            effective_focal_y,
+            view,
+        )
+        gaussians = align_gaussians_to_reference(
+            gaussians,
+            ref_disp_view,
+            effective_focal_x,
+            effective_focal_y,
+            effective_width,
+            effective_height,
+            grid_resolution=8,
+        )
+
+        # ------------------------------------------------------------------
+        # 9. Rotate into world frame
+        # ------------------------------------------------------------------
+        R = view.rotation_matrix  # 3x3
+        transform = torch.zeros(3, 4, device=device, dtype=torch.float32)
+        transform[:3, :3] = torch.from_numpy(R).float().to(device)
+        # Translation is zero (viewer at origin)
+
+        gaussians = apply_transform(gaussians, transform)
+
+        all_gaussians.append(gaussians)
+        LOGGER.info(
+            "  -> %d Gaussians in world frame",
+            gaussians.mean_vectors.shape[1],
+        )
+
+    _progress("sharp", side_count, side_count)
+
+    # ------------------------------------------------------------------
+    # 10. Merge all faces
+    # ------------------------------------------------------------------
+    merged = merge_gaussians(all_gaussians)
+    total_gaussians = merged.mean_vectors.shape[1]
+    LOGGER.info("Merged: %d total Gaussians from %d faces", total_gaussians, side_count)
+
+    # ------------------------------------------------------------------
+    # 11. Global scale restore
+    # ------------------------------------------------------------------
+    # Normalize scene so that the median distance from origin ~ 5 meters
+    # (matching DA360's median-based normalization)
+    distances = torch.linalg.norm(merged.mean_vectors[0], dim=-1)
+    median_dist = distances.median().item()
+    if median_dist > 1e-4:
+        target_median = 5.0
+        global_scale = target_median / median_dist
+        merged = scale_gaussians(merged, global_scale)
+        LOGGER.info(
+            "Global scale: %.4f (median dist %.2f -> %.2f)",
+            global_scale, median_dist, target_median,
+        )
+
+    # ------------------------------------------------------------------
+    # 12. PLY export via SHARP's save_ply()
+    # ------------------------------------------------------------------
+    _progress("export", 0, 1)
+    out_path = Path(output_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    save_ply(
+        merged,
+        f_px=f_px_tuple,
+        image_shape=(effective_height, effective_width),
+        path=out_path,
+    )
+    LOGGER.info("Saved PLY: %s (%d Gaussians)", out_path, total_gaussians)
+    _progress("export", 1, 1)
+
+    return {
+        "num_gaussians": total_gaussians,
+        "num_faces": side_count,
+        "output_path": str(out_path),
+    }

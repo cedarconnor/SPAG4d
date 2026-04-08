@@ -32,7 +32,7 @@ def extract_conditioning_mesh(depth_map, panorama, simplify_ratio=0.1):
     xs = x[::stride, ::stride].flatten()
     ys = y[::stride, ::stride].flatten()
     zs = z[::stride, ::stride].flatten()
-    colors = panorama[::stride, ::stride].reshape(-1, 3)
+    colors = panorama[::stride, ::stride, :3].reshape(-1, 3)
 
     valid = (depth_map[::stride, ::stride].flatten() > 0.01) & \
             (depth_map[::stride, ::stride].flatten() < 500)

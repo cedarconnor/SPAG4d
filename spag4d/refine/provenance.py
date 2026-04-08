@@ -45,3 +45,61 @@ def apply_provenance_lr_scaling(gaussians, initial_count, scale=0.1):
                 # useful for diagnostics and future per-param optimization.
 
     logger.info(f"Provenance tagged for {initial_count} original Gaussians (scale={scale})")
+
+
+# ---------------------------------------------------------------------------
+# Provenance tag constants
+# ---------------------------------------------------------------------------
+
+PROVENANCE_ORIGINAL = 0
+PROVENANCE_DENSIFIED = 1
+PROVENANCE_OMNIROAM = 2
+PROVENANCE_GAP_SEED = 3
+
+
+def tag_provenance_by_range(gaussians, start_idx, end_idx, tag_value):
+    """Tag a range of Gaussians with a specific provenance value.
+
+    Creates the ``_provenance`` tensor if it does not exist yet, padding with
+    zeros for any Gaussians that were added since the last provenance update.
+
+    Args:
+        gaussians: GaussianModel instance (or None — no-op if None).
+        start_idx: Inclusive start index of the range to tag.
+        end_idx: Exclusive end index of the range to tag.
+        tag_value: Integer/float provenance constant to assign (see
+            PROVENANCE_* constants in this module).
+    """
+    if gaussians is None:
+        return
+
+    if not hasattr(gaussians, '_provenance'):
+        current_count = gaussians.get_xyz.shape[0]
+        gaussians._provenance = torch.zeros(current_count, device=gaussians.get_xyz.device)
+
+    current_count = gaussians.get_xyz.shape[0]
+    if gaussians._provenance.shape[0] < current_count:
+        extra = torch.zeros(
+            current_count - gaussians._provenance.shape[0],
+            device=gaussians._provenance.device,
+        )
+        gaussians._provenance = torch.cat([gaussians._provenance, extra])
+
+    gaussians._provenance[start_idx:end_idx] = tag_value
+    logger.info(f"Tagged Gaussians [{start_idx}:{end_idx}] with provenance={tag_value}")
+
+
+def get_provenance_mask(gaussians, tag_value):
+    """Get boolean mask for Gaussians with a specific provenance tag.
+
+    Args:
+        gaussians: GaussianModel instance (or None).
+        tag_value: The provenance constant to match (see PROVENANCE_* constants).
+
+    Returns:
+        Boolean tensor mask of shape (N,), or None if gaussians is None or
+        has no ``_provenance`` attribute.
+    """
+    if gaussians is None or not hasattr(gaussians, '_provenance'):
+        return None
+    return gaussians._provenance == tag_value

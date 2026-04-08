@@ -1,0 +1,69 @@
+[project]
+name = "sharp"
+version = "0.1"
+description = "Inference/Network/Model code for SHARP view synthesis model."
+readme = "README.md"
+dependencies = [
+  "click",
+  "gsplat",
+  "imageio[ffmpeg]",
+  "matplotlib",
+  "pillow-heif",
+  "plyfile",
+  "scipy",
+  "timm",
+  "torch",
+  "torchvision",
+]
+
+[project.scripts]
+sharp = "sharp.cli:main_cli"
+
+[project.urls]
+Homepage = "https://github.com/apple/ml-sharp"
+Repository = "https://github.com/apple/ml-sharp"
+
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pyright]
+include = ["src"]
+exclude = [
+    "**/node_modules",
+    "**/__pycache__",
+]
+pythonVersion = "3.13"
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q"
+testpaths = [
+    "tests"
+]
+filterwarnings = [
+    "ignore::DeprecationWarning"
+]
+
+[tool.lint.per-file-ignores]
+"__init__.py" = ["F401", "D100", "D104"]
+
+[tool.ruff]
+line-length = 100
+lint.select = ["E", "F", "D", "I"]
+lint.ignore = ["D100", "D105",
+  # Imperative mood of docstring.
+  "D401",
+]
+extend-exclude = [
+    "*external*",
+    "third_party",
+]
+src = ["sharp"]
+target-version = "py39"
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"

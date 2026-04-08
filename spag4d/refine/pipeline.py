@@ -50,6 +50,8 @@ def refine_splat(
     # Load panorama
     from PIL import Image
     panorama = np.array(Image.open(panorama_path)).astype(np.float32) / 255.0
+    if panorama.ndim == 3 and panorama.shape[2] == 4:
+        panorama = panorama[:, :, :3]
 
     report("camera_rig", 5)
 
@@ -77,17 +79,27 @@ def refine_splat(
 
     report("finetune", 15)
 
+    # Load Gaussians early so we can render cubemap views for fine-tuning
+    gaussians = load_gaussians_from_ply(ply_path, device="cuda")
+
+    # Render GS from cubemap cameras — these have holes, unlike the panorama faces.
+    # Fine-tuning needs (holey GS render → clean panorama face) pairs so the model
+    # learns to fill holes, not just identity mapping.
+    cubemap_gs_renders = []
+    for cam in cubemap_cameras:
+        rgb, _ = render_with_hole_mask(gaussians, cam, alpha_threshold=config.alpha_threshold)
+        cubemap_gs_renders.append(rgb)
+
     # Phase 2: GSFixer
     gsfixer = GSFixerAdapter(checkpoint_path=config.gsfixer_checkpoint, device="cuda")
     gsfixer.load()
     gsfixer.finetune(
-        gs_renders=cubemap_faces, gt_images=cubemap_faces,
+        gs_renders=cubemap_gs_renders, gt_images=cubemap_faces,
         mesh=mesh, cameras=cubemap_cameras,
         train_steps=config.finetune_steps, learning_rate=config.finetune_lr,
     )
 
     report("render_holes", 30)
-    gaussians = load_gaussians_from_ply(ply_path, device="cuda")
 
     # Track initial count for provenance
     initial_gaussian_count = 0

@@ -180,6 +180,42 @@ def distill_to_gaussians(
     return gaussians
 
 
+def compute_weighted_loss(
+    rendered: "torch.Tensor",
+    gt: "torch.Tensor",
+    tier2_weight: float = 1.0,
+    hole_mask: "torch.Tensor" = None,
+) -> "torch.Tensor":
+    """Compute L1 loss with tier-2 weighting and optional hole masking.
+
+    Args:
+        rendered: (3, H, W) rendered image tensor.
+        gt: (3, H, W) ground truth image tensor.
+        tier2_weight: Weight multiplier (1.0 for tier-1, 0.15-0.30 for tier-2).
+        hole_mask: Optional (H, W) float tensor. If provided, loss is only
+            computed in regions where mask > 0.5 (hole regions).
+
+    Returns:
+        Scalar loss tensor.
+    """
+    import torch
+
+    if hole_mask is not None:
+        mask = (hole_mask > 0.5).unsqueeze(0).float()
+        if mask.sum() < 1:
+            return torch.tensor(0.0, device=rendered.device, requires_grad=True)
+        rendered_m = rendered * mask
+        gt_m = gt * mask
+        n_pixels = mask.sum() * 3
+        l1 = torch.abs(rendered_m - gt_m).sum() / n_pixels
+        loss = l1
+    else:
+        l1 = torch.abs(rendered - gt).mean()
+        loss = l1
+
+    return loss * tier2_weight
+
+
 def _apply_original_lr_scaling(gaussians, initial_count, scale=0.1):
     """Reduce LR for original Gaussians by creating per-param LR masks.
 

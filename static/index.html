@@ -100,9 +100,10 @@
 
                 <h3>Conversion Parameters</h3>
                 <dl class="help-params">
-                    <dt>Depth Model</dt>
+                    <dt>Generator</dt>
                     <dd><strong>DA360</strong> (default) = scale-invariant disparity with 360° padding.
-                        <strong>DAP</strong> = metric depth for panoramas.</dd>
+                        <strong>DAP</strong> = metric depth for panoramas.
+                        <strong>SHARP 360</strong> = per-face ML prediction for higher quality (slower).</dd>
 
                     <dt>Stride</dt>
                     <dd>Pixel stride for Gaussian generation. 1 = max quality, 2 = balanced (default), 4 = fast preview.</dd>
@@ -169,13 +170,31 @@
 
                 <!-- Parameters -->
                 <div class="params-row">
-                    <div class="param-group"
-                        title="Depth estimation model. DAP = metric depth for 360°. DA360 = circular padding DPT.">
-                        <label for="depth-model">Depth Model</label>
-                        <select id="depth-model" style="width: 85px;">
-                            <option value="dap">DAP</option>
+                    <div class="field" style="min-width: 100px;"
+                        title="Splat generator. DA360/DAP = depth-based SPAG. SHARP 360 = per-face ML prediction.">
+                        <label for="generator">Generator</label>
+                        <select id="generator" style="width: 120px;">
                             <option value="da360" selected>DA360</option>
+                            <option value="dap">DAP</option>
+                            <option value="sharp360">SHARP 360</option>
                         </select>
+                    </div>
+
+                    <div id="sharp360-settings" style="display:none;">
+                        <div class="field" style="min-width: 80px;">
+                            <label for="side-count">Sides</label>
+                            <select id="side-count" style="width: 60px;">
+                                <option value="4">4</option>
+                                <option value="6" selected>6</option>
+                                <option value="8">8</option>
+                                <option value="10">10</option>
+                                <option value="12">12</option>
+                            </select>
+                        </div>
+                        <div class="field" style="min-width: 100px;">
+                            <label for="seedvr2-upscale">SeedVR2</label>
+                            <input type="checkbox" id="seedvr2-upscale">
+                        </div>
                     </div>
 
                     <div class="param-group"
@@ -240,7 +259,13 @@
             <!-- Refinement Controls -->
             <div id="refine-panel" class="controls-panel" style="display: none;">
                 <div class="actions-row">
-                    <span class="section-label">Splat Refinement (GSFix3D)</span>
+                    <span class="section-label">Splat Refinement</span>
+                    <div class="param-group" title="Refinement backend: GSFix3D (diffusion inpainting) or OmniRoam (trajectory-coherent video fill)">
+                        <select id="refine-backend" style="font-size: 0.75rem; padding: 2px 4px;">
+                            <option value="gsfix3d" selected>GSFix3D</option>
+                            <option value="omniroam">OmniRoam v2</option>
+                        </select>
+                    </div>
                     <button id="refine-btn" class="action-btn" disabled>
                         <span class="btn-icon">🔧</span>
                         Refine
@@ -250,7 +275,7 @@
                         Refined PLY
                     </button>
                 </div>
-                <div class="params-row">
+                <div class="params-row" id="gsfix3d-params">
                     <div class="param-group" title="Number of novel-view cameras for hole detection. More = better coverage, slower.">
                         <label for="num-cameras">Cameras</label>
                         <select id="num-cameras">
@@ -273,6 +298,39 @@
                         <div class="param-group" title="GSFixer scene adaptation steps. More = better quality, slower (~1min per 100 steps).">
                             <label for="finetune-steps">Finetune Steps</label>
                             <input type="number" id="finetune-steps" value="500" min="100" max="2000" step="100">
+                        </div>
+                    </details>
+                </div>
+                <div class="params-row" id="omniroam-params" style="display: none;">
+                    <div class="param-group" title="Trajectory selection: auto (gap-directed), all (4 cardinal), or specific presets.">
+                        <label for="trajectory-mode">Trajectories</label>
+                        <select id="trajectory-mode">
+                            <option value="auto" selected>Auto (gap-directed)</option>
+                            <option value="all">All cardinal</option>
+                            <option value="forward">Forward only</option>
+                            <option value="forward,right">Forward + Right</option>
+                        </select>
+                    </div>
+                    <div class="param-group" title="Number of refinement iterations.">
+                        <label for="max-rounds-v2">Rounds</label>
+                        <select id="max-rounds-v2">
+                            <option value="1">1</option>
+                            <option value="2">2</option>
+                            <option value="3" selected>3</option>
+                        </select>
+                    </div>
+                    <div class="param-group" title="Optional video upscaling after OmniRoam generation. SeedVR2 upscales 480p to ~1024p for sharper perspective crops.">
+                        <label for="upscale-backend">Upscale</label>
+                        <select id="upscale-backend">
+                            <option value="none" selected>None (480p)</option>
+                            <option value="seedvr2">SeedVR2 (1024p)</option>
+                        </select>
+                    </div>
+                    <details class="param-group advanced-params">
+                        <summary>Advanced</summary>
+                        <div class="param-group" title="Weight for OmniRoam pseudo-views (lower = more conservative). Range 0.05-0.50.">
+                            <label for="tier2-weight">Tier-2 Weight</label>
+                            <input type="number" id="tier2-weight" value="0.20" min="0.05" max="0.50" step="0.05">
                         </div>
                     </details>
                 </div>

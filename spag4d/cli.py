@@ -43,6 +43,12 @@ def main():
               help='Max refinement iterations (default: 3)')
 @click.option('--refine-cameras', default=36, type=int,
               help='Novel-view cameras for hole detection (default: 36)')
+@click.option('--generator', type=click.Choice(['da360', 'dap', 'sharp360']),
+              default=None, help='Generator mode: da360, dap, or sharp360 (overrides --depth-model)')
+@click.option('--side-count', type=int, default=6,
+              help='Number of faces for SHARP 360 projection (default: 6)')
+@click.option('--seedvr2-upscale', is_flag=True,
+              help='Upscale faces with SeedVR2 before SHARP prediction')
 def convert(
     input_path: str,
     output_path: str,
@@ -64,6 +70,9 @@ def convert(
     refine: bool,
     refine_iterations: int,
     refine_cameras: int,
+    generator: str,
+    side_count: int,
+    seedvr2_upscale: bool,
 ):
     """
     Convert equirectangular panorama to Gaussian splat PLY.
@@ -80,8 +89,14 @@ def convert(
     output_path = Path(output_path)
 
     if not quiet:
-        mode = "SHARP refined" if sharp_refine else f"SPAG (stride={stride})"
-        click.echo(f"Loading SPAG-4D [{depth_model.upper()} + {mode}]...")
+        if generator == 'sharp360':
+            mode = f"SHARP 360 (sides={side_count}{', SeedVR2 upscale' if seedvr2_upscale else ''})"
+        elif sharp_refine:
+            mode = "SHARP refined"
+        else:
+            mode = f"SPAG (stride={stride})"
+        depth_label = (generator or depth_model).upper()
+        click.echo(f"Loading SPAG-4D [{depth_label} + {mode}]...")
 
     converter = SPAG4D(
         device=device,
@@ -90,6 +105,7 @@ def convert(
         sharp_refine=sharp_refine,
         sharp_cubemap_size=sharp_cubemap_size,
         sharp_projection_mode=sharp_projection,
+        generator=generator,
     )
 
     def run_single(img_path, out_path):
@@ -103,6 +119,9 @@ def convert(
             outlier_pruning=outlier_pruning,
             global_scale=global_scale,
             force_erp=force_erp,
+            generator=generator or depth_model,
+            side_count=side_count,
+            seedvr2_upscale=seedvr2_upscale,
         )
 
     if batch:
@@ -164,7 +183,7 @@ def convert(
 
 
 @main.command('download-models')
-@click.option('--model', type=click.Choice(['dap', 'da360', 'gsfix3d', 'all']),
+@click.option('--model', type=click.Choice(['dap', 'da360', 'gsfix3d', 'sharp', 'seedvr2', 'all']),
               default='all', help='Which model weights to download')
 @click.option('--verify', is_flag=True, help='Verify downloaded weights')
 def download_models(model: str, verify: bool):
@@ -213,6 +232,15 @@ def download_models(model: str, verify: bool):
             click.echo(f"GSFix3D download failed: {e}", err=True)
             if model == 'gsfix3d':
                 raise click.Abort()
+
+    if model in ('sharp', 'all'):
+        click.echo("SHARP model: auto-downloads on first use via Hugging Face Hub.")
+        click.echo("No manual download required.")
+
+    if model in ('seedvr2', 'all'):
+        click.echo("SeedVR2 requires manual installation.")
+        click.echo("Please follow the instructions at: https://github.com/TencentARC/SeedVR")
+        click.echo("Install the package and place weights in pretrained/seedvr2/ before using --seedvr2-upscale.")
 
 
 @main.command()

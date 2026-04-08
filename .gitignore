@@ -98,6 +98,7 @@ spag4d/da360_arch/DA360/
 
 # Dependencies (Local)
 ml-sharp/
+!spag4d/sharp_arch/ml-sharp/
 
 # Removed v1 submodule
 src/

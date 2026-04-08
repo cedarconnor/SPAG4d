@@ -36,6 +36,7 @@ class SPAG4D:
         depth_model: str = "da360",
         model_path: Optional[str] = None,
         use_mock_dap: bool = False,
+        generator: Optional[str] = None,
     ):
         self.device = torch.device(
             device if device != "cuda" or torch.cuda.is_available() else "cpu"
@@ -45,8 +46,12 @@ class SPAG4D:
         self.use_mock_dap = use_mock_dap
         self._depth_models = {}  # lazy-loaded cache: name -> model
 
-        # Eagerly load the default depth model
-        self._get_depth_model(depth_model)
+        # generator overrides depth_model when provided
+        self.generator = generator or depth_model
+
+        # Eagerly load the default depth model only for non-sharp360 generators
+        if self.generator in ("da360", "dap"):
+            self._get_depth_model(self.generator)
 
     def _get_depth_model(self, name: str):
         """Get or lazy-load a depth model by name."""
@@ -83,6 +88,9 @@ class SPAG4D:
         grid_jitter: float = 0.0,
         depth_preview_path: Optional[Union[str, Path]] = None,
         depth_npy_path: Optional[Union[str, Path]] = None,
+        generator: Optional[str] = None,
+        side_count: int = 6,
+        seedvr2_upscale: bool = False,
     ) -> ConversionResult:
         """
         Convert equirectangular panorama to Gaussian splat PLY.
@@ -125,6 +133,30 @@ class SPAG4D:
             )
 
         image_tensor = torch.from_numpy(np.array(img)).to(self.device)
+
+        # Dispatch to sharp360 generator if requested
+        active_generator = generator or self.generator
+        if active_generator == "sharp360":
+            from .sharp360 import convert_sharp360
+            from .seedvr2 import SeedVR2Config
+            seedvr2_cfg = SeedVR2Config() if seedvr2_upscale else None
+            result_dict = convert_sharp360(
+                input_path=str(input_path),
+                output_path=str(output_path),
+                device=self.device,
+                side_count=side_count,
+                seedvr2_upscale=seedvr2_upscale,
+                seedvr2_config=seedvr2_cfg,
+            )
+            file_size = Path(output_path).stat().st_size
+            return ConversionResult(
+                output_path=str(output_path),
+                splat_count=result_dict["num_gaussians"],
+                file_size=file_size,
+                processing_time=result_dict.get("processing_time", 0.0),
+                depth_range=(0.0, 0.0),
+                panorama_size=(W, H),
+            )
 
         # Estimate depth
         dm_name = depth_model or self.default_depth_model
