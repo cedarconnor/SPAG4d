@@ -102,9 +102,12 @@ def make_horizon_view(index: int, side_count: int) -> FaceOrientation:
         math.cos(azimuth_rad),
     ], dtype=np.float64)
 
-    # Camera Y-axis points downward in image space.
-    # SHARP convention: down = +Y (matching Apple's ml-sharp and SHARP_360_to_Splat)
-    down = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+    # Camera Y-axis points downward in image space.  For face extraction to
+    # map image-bottom to world-below-horizon (and for GaussianSplats3D's Y-up
+    # convention), we need camera-down to map to world -Y.
+    # The resulting rotation matrix has det=-1 (reflection), but SHARP's
+    # apply_transform handles this correctly via SVD decomposition.
+    down = np.array([0.0, -1.0, 0.0], dtype=np.float64)
 
     # Right vector — explicit formula matching SHARP_360_to_Splat reference
     right = np.array([
@@ -973,23 +976,6 @@ def convert_sharp360(
                 "Global scale restore: %.4f (%.2f -> %.2f median radius)",
                 global_scale, current_median, original_scene_median,
             )
-
-    # ------------------------------------------------------------------
-    # 11.5. Flip Y to match viewer convention
-    # ------------------------------------------------------------------
-    # SHARP uses Y-down camera convention (down = +Y in world frame).
-    # The GaussianSplats3D viewer and SPAG's DA360 path use Y-up.
-    # Negate Y to convert from SHARP's Y-down world to the viewer's Y-up.
-    from sharp.utils.gaussians import Gaussians3D as _G3D
-    flipped_means = merged.mean_vectors.clone()
-    flipped_means[:, :, 1] *= -1.0
-    merged = _G3D(
-        mean_vectors=flipped_means,
-        singular_values=merged.singular_values,
-        quaternions=merged.quaternions,
-        colors=merged.colors,
-        opacities=merged.opacities,
-    )
 
     # ------------------------------------------------------------------
     # 12. PLY export via SHARP's save_ply()
