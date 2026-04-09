@@ -975,6 +975,23 @@ def convert_sharp360(
             )
 
     # ------------------------------------------------------------------
+    # 11.5. Flip Y to match viewer convention
+    # ------------------------------------------------------------------
+    # SHARP uses Y-down camera convention (down = +Y in world frame).
+    # The GaussianSplats3D viewer and SPAG's DA360 path use Y-up.
+    # Negate Y to convert from SHARP's Y-down world to the viewer's Y-up.
+    from sharp.utils.gaussians import Gaussians3D as _G3D
+    flipped_means = merged.mean_vectors.clone()
+    flipped_means[:, :, 1] *= -1.0
+    merged = _G3D(
+        mean_vectors=flipped_means,
+        singular_values=merged.singular_values,
+        quaternions=merged.quaternions,
+        colors=merged.colors,
+        opacities=merged.opacities,
+    )
+
+    # ------------------------------------------------------------------
     # 12. PLY export via SHARP's save_ply()
     # ------------------------------------------------------------------
     _progress("export", 0, 1)
