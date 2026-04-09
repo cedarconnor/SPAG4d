@@ -106,9 +106,12 @@ def make_horizon_view(index: int, side_count: int) -> FaceOrientation:
     # SHARP convention: down = +Y (matching Apple's ml-sharp and SHARP_360_to_Splat)
     down = np.array([0.0, 1.0, 0.0], dtype=np.float64)
 
-    # Right completes the right-hand system: right = forward x down
-    right = np.cross(forward, down)
-    right = right / np.linalg.norm(right)
+    # Right vector — explicit formula matching SHARP_360_to_Splat reference
+    right = np.array([
+        math.cos(azimuth_rad),
+        0.0,
+        -math.sin(azimuth_rad),
+    ], dtype=np.float64)
 
     # Name
     if side_count == 2:
@@ -131,8 +134,13 @@ def build_extraction_layout(
 ) -> ExtractionLayout:
     """Build an extraction layout for *side_count* horizon views.
 
+    Matches the SHARP_360_to_Splat reference:
+    - image_width is widened to accommodate the overlap FOV
+    - image_height = panorama_height (tall faces for full vertical coverage)
+    - focal_y = focal_x (square pixels)
+
     Args:
-        face_size: Width and height of each extracted perspective face in pixels.
+        face_size: Base face width in pixels (before overlap widening).
         panorama_height: Height of the input ERP panorama in pixels.
         side_count: Number of horizon views (default 6).
         overlap_degrees: Extra FOV overlap per side in degrees (default 10).
@@ -140,15 +148,20 @@ def build_extraction_layout(
     Returns:
         An ExtractionLayout with the computed views and intrinsics.
     """
-    base_fov_deg = 360.0 / side_count
-    total_fov_deg = base_fov_deg + overlap_degrees
-    total_fov_rad = math.radians(total_fov_deg)
+    span_deg = 360.0 / side_count
+    view_fov_deg = min(170.0, span_deg + overlap_degrees)
 
-    # Focal length derived from horizontal FOV and face width
-    focal_px = (face_size / 2.0) / math.tan(total_fov_rad / 2.0)
+    # Widen image to accommodate the overlap FOV (reference: insp_to_splat.py:1223)
+    image_width = max(face_size, int(round(face_size * (view_fov_deg / span_deg))))
 
-    # Vertical FOV: the face is square, so vertical focal = horizontal focal
-    # (square pixels).  We keep focal_y_px equal to focal_px.
+    # Focal length from the widened image and total FOV
+    focal_px = (image_width / 2.0) / math.tan(math.radians(view_fov_deg) / 2.0)
+
+    # Tall faces: image_height = panorama_height for full vertical coverage
+    # (reference: insp_to_splat.py:1225 with cutoff_height_percent=0)
+    image_height = panorama_height
+
+    # Square pixels: focal_y = focal_x
     focal_y_px = focal_px
 
     views = [make_horizon_view(i, side_count) for i in range(side_count)]
@@ -159,8 +172,8 @@ def build_extraction_layout(
         views=views,
         focal_px=focal_px,
         focal_y_px=focal_y_px,
-        image_width=face_size,
-        image_height=face_size,
+        image_width=image_width,
+        image_height=image_height,
     )
 
 
@@ -412,16 +425,20 @@ def extract_perspective_scalar_view(
 
 def filter_gaussians_by_view_border(
     gaussians: "Gaussians3D",
-    clip_degrees: float,
+    horizontal_degrees: float,
+    vertical_degrees: float = None,
 ) -> "Gaussians3D":
-    """Hard Voronoi clipping: keep only Gaussians within *clip_degrees* of the
-    view's forward (+Z) axis.
+    """Hard Voronoi clipping: keep Gaussians within a horizontal angular strip.
 
-    The Gaussians are assumed to be in view-local coordinates (forward = +Z).
+    Clips **horizontally only** by default (matching SHARP_360_to_Splat
+    reference), preserving full vertical extent. Uses the tan-ratio in
+    image-plane coordinates, not a spherical cone.
 
     Args:
         gaussians: Gaussians3D with tensors of shape (1, N, D).
-        clip_degrees: Half-angle in degrees for the clipping cone.
+        horizontal_degrees: Total horizontal clip width in degrees.
+        vertical_degrees: Optional total vertical clip height in degrees.
+            If None, no vertical clipping is applied.
 
     Returns:
         Filtered Gaussians3D.
@@ -429,12 +446,25 @@ def filter_gaussians_by_view_border(
     from sharp.utils.gaussians import Gaussians3D as _G3D
 
     means = gaussians.mean_vectors[0]  # (N, 3)
-    # Angle from +Z axis
-    norms = torch.linalg.norm(means, dim=-1).clamp(min=1e-8)
-    cos_angle = means[:, 2] / norms  # dot with (0,0,1)
-    angle_deg = torch.acos(cos_angle.clamp(-1.0, 1.0)) * (180.0 / PI)
+    depth = means[:, 2]  # view-local Z
 
-    mask = angle_deg <= clip_degrees
+    # Horizontal limit: |X/Z| <= tan(half_horizontal)
+    if horizontal_degrees >= 179.0:
+        h_limit = float("inf")
+    else:
+        h_limit = math.tan(math.radians(horizontal_degrees / 2.0))
+
+    h_ratio = torch.abs(means[:, 0]) / depth.clamp(min=1e-6)
+    mask = (depth > 0.0) & (h_ratio <= h_limit)
+
+    # Optional vertical clipping
+    if vertical_degrees is not None and vertical_degrees > 0.0:
+        if vertical_degrees >= 179.0:
+            v_limit = float("inf")
+        else:
+            v_limit = math.tan(math.radians(vertical_degrees / 2.0))
+        v_ratio = torch.abs(means[:, 1]) / depth.clamp(min=1e-6)
+        mask = mask & (v_ratio <= v_limit)
 
     return _G3D(
         mean_vectors=gaussians.mean_vectors[:, mask],
@@ -476,78 +506,107 @@ def align_gaussians_to_reference(
     from sharp.utils.gaussians import Gaussians3D as _G3D
 
     device = gaussians.mean_vectors.device
-    means = gaussians.mean_vectors[0]  # (N, 3)
-    N = means.shape[0]
+    mv = gaussians.mean_vectors  # (1, N, 3)
+    mv_np = mv[0].detach().cpu().numpy().astype(np.float32)
+    N = mv_np.shape[0]
 
     if N == 0:
         return gaussians
 
-    # Project Gaussian centres onto image plane to get pixel coords
-    depths = means[:, 2].clamp(min=1e-6)  # view-local Z depth
-    px_x = means[:, 0] / depths * focal_x_px + image_width / 2.0
-    px_y = means[:, 1] / depths * focal_y_px + image_height / 2.0
+    depth_z = mv_np[:, 2]
+    radial = np.linalg.norm(mv_np, axis=1)
 
-    # Assign each Gaussian to a grid cell
-    cell_w = image_width / grid_resolution
-    cell_h = image_height / grid_resolution
-    gx = (px_x / cell_w).long().clamp(0, grid_resolution - 1)
-    gy = (px_y / cell_h).long().clamp(0, grid_resolution - 1)
+    # Project Gaussian centres to pixel coordinates
+    valid = depth_z > 1e-6
+    px_x = (mv_np[:, 0] / np.clip(depth_z, 1e-6, None)) * focal_x_px + (image_width / 2.0) - 0.5
+    px_y = (mv_np[:, 1] / np.clip(depth_z, 1e-6, None)) * focal_y_px + (image_height / 2.0) - 0.5
+    valid &= (px_x >= 0) & (px_x <= image_width - 1)
+    valid &= (px_y >= 0) & (px_y <= image_height - 1)
 
-    # SHARP disparity = focal / depth  (approximate)
-    sharp_disp = focal_x_px / depths
+    # Aspect-ratio-aware grid (reference: insp_to_splat.py:2057)
+    grid_cx = max(1, int(grid_resolution))
+    grid_cy = max(1, int(round(grid_cx * (image_height / max(1, image_width)))))
 
-    # Sample DA360 reference disparity at Gaussian pixel locations
-    ref_disp_t = torch.from_numpy(ref_disparity_view).float().to(device)
-    # Bilinear sample from reference disparity
-    px_xi = px_x.clamp(0, image_width - 1).long()
-    px_yi = px_y.clamp(0, image_height - 1).long()
-    ref_disp_at_gauss = ref_disp_t[px_yi, px_xi]
+    per_point_scale = np.ones(N, dtype=np.float32)
+    median_scale = 1.0
+    count = 0
 
-    # Compute per-cell median scale ratio: ref_disp / sharp_disp
-    scale_grid = torch.ones(grid_resolution, grid_resolution, device=device)
-    for cy_idx in range(grid_resolution):
-        for cx_idx in range(grid_resolution):
-            cell_mask = (gx == cx_idx) & (gy == cy_idx)
-            if cell_mask.sum() < 5:
-                continue
-            ratios = ref_disp_at_gauss[cell_mask] / sharp_disp[cell_mask].clamp(min=1e-8)
-            # Use log-median for robustness
-            log_ratios = torch.log(ratios.clamp(min=1e-8))
-            scale_grid[cy_idx, cx_idx] = torch.exp(log_ratios.median())
+    if int(valid.sum()) >= 64:
+        # Sample reference disparity at valid Gaussian pixel locations
+        ref_disp = bilinear_sample_scalar(
+            ref_disparity_view, px_x[valid], px_y[valid],
+        )
+        ok = np.isfinite(ref_disp) & (ref_disp > 1e-6) & (radial[valid] > 1e-6)
+        count = int(ok.sum())
 
-    # Smooth the scale grid (simple 3x3 Gaussian blur)
-    kernel = torch.tensor(
-        [[1, 2, 1], [2, 4, 2], [1, 2, 1]], dtype=torch.float32, device=device
-    ) / 16.0
-    sg = scale_grid.unsqueeze(0).unsqueeze(0)  # (1, 1, G, G)
-    sg_padded = torch.nn.functional.pad(sg, (1, 1, 1, 1), mode="replicate")
-    sg_smooth = torch.nn.functional.conv2d(sg_padded, kernel.unsqueeze(0).unsqueeze(0))
-    scale_grid = sg_smooth.squeeze()
+        if count >= 64:
+            # Compute scale ratio in depth space: ref_depth / sharp_radial
+            ref_depth_ok = (1.0 / ref_disp[ok]).astype(np.float32)
+            sharp_r_ok = radial[valid][ok]
+            raw_scale = ref_depth_ok / sharp_r_ok
 
-    # Look up per-Gaussian scale from the smooth grid
-    per_gauss_scale = scale_grid[gy, gx]
+            # Global robust median
+            lo, hi = np.quantile(raw_scale, [0.05, 0.95])
+            trimmed = raw_scale[(raw_scale >= lo) & (raw_scale <= hi)]
+            median_scale = (
+                float(np.median(trimmed)) if trimmed.size > 0
+                else float(np.median(raw_scale))
+            )
 
-    # Scale depth and positions: new_depth = depth * scale_ratio
-    # Since disparity = f/depth, scaling disparity by ratio means:
-    # new_depth = depth / scale_ratio
-    inv_scale = 1.0 / per_gauss_scale.clamp(min=1e-4)
+            # Build coarse NxM grid of median scales
+            px_ok = px_x[valid][ok]
+            py_ok = px_y[valid][ok]
+            cell_w = image_width / grid_cx
+            cell_h = image_height / grid_cy
+            grid = np.full((grid_cy, grid_cx), median_scale, dtype=np.float32)
 
-    new_means = means.clone()
-    new_means[:, 2] = means[:, 2] * inv_scale
-    # Also scale X, Y to maintain ray direction
-    new_means[:, 0] = means[:, 0] * inv_scale
-    new_means[:, 1] = means[:, 1] * inv_scale
+            for gy in range(grid_cy):
+                for gx_idx in range(grid_cx):
+                    in_cell = (
+                        (px_ok >= gx_idx * cell_w) & (px_ok < (gx_idx + 1) * cell_w) &
+                        (py_ok >= gy * cell_h) & (py_ok < (gy + 1) * cell_h)
+                    )
+                    if int(in_cell.sum()) >= 8:
+                        cs = raw_scale[in_cell]
+                        cl, ch = np.quantile(cs, [0.1, 0.9])
+                        ct = cs[(cs >= cl) & (cs <= ch)]
+                        if ct.size > 0:
+                            grid[gy, gx_idx] = float(np.median(ct))
 
-    # Scale singular values accordingly
-    new_sv = gaussians.singular_values[0] * inv_scale.unsqueeze(-1)
+            grid = np.clip(grid, median_scale * 0.1, median_scale * 10.0)
+
+            # Bilinear interpolate grid to every Gaussian
+            all_px = np.clip(px_x, 0, image_width - 1)
+            all_py = np.clip(px_y, 0, image_height - 1)
+            gxc = all_px / cell_w - 0.5
+            gyc = all_py / cell_h - 0.5
+            gx0 = np.clip(np.floor(gxc).astype(np.int32), 0, grid_cx - 1)
+            gy0 = np.clip(np.floor(gyc).astype(np.int32), 0, grid_cy - 1)
+            gx1 = np.clip(gx0 + 1, 0, grid_cx - 1)
+            gy1 = np.clip(gy0 + 1, 0, grid_cy - 1)
+            wx = np.clip(gxc - gx0, 0, 1).astype(np.float32)
+            wy = np.clip(gyc - gy0, 0, 1).astype(np.float32)
+            per_point_scale = (
+                grid[gy0, gx0] * (1 - wx) * (1 - wy) +
+                grid[gy0, gx1] * wx * (1 - wy) +
+                grid[gy1, gx0] * (1 - wx) * wy +
+                grid[gy1, gx1] * wx * wy
+            )
+            per_point_scale[~valid] = median_scale
+
+    scale_t = (
+        torch.from_numpy(per_point_scale)
+        .to(device=device, dtype=mv.dtype)
+        .unsqueeze(0).unsqueeze(-1)
+    )  # (1, N, 1)
 
     return _G3D(
-        mean_vectors=new_means.unsqueeze(0),
-        singular_values=new_sv.unsqueeze(0),
+        mean_vectors=mv * scale_t,
+        singular_values=gaussians.singular_values * scale_t,
         quaternions=gaussians.quaternions,
         colors=gaussians.colors,
         opacities=gaussians.opacities,
-    )
+    ), median_scale, count
 
 
 def scale_gaussians(
@@ -813,9 +872,10 @@ def convert_sharp360(
     predictor = _load_sharp_predictor(device)
     f_px_tuple = (effective_focal_x, effective_focal_y)
 
-    clip_degrees = 360.0 / side_count / 2.0  # Hard Voronoi half-angle
+    clip_degrees = 360.0 / side_count  # Total horizontal clip width per face
 
     all_gaussians: List[Gaussians3D] = []
+    original_median_radii: List[float] = []
 
     for idx, view in enumerate(layout.views):
         _progress("sharp", idx, side_count)
@@ -833,13 +893,18 @@ def convert_sharp360(
         )
 
         # ------------------------------------------------------------------
-        # 7. Hard Voronoi border clipping
+        # 7. Hard Voronoi border clipping (horizontal only)
         # ------------------------------------------------------------------
         gaussians = filter_gaussians_by_view_border(gaussians, clip_degrees)
         LOGGER.info(
             "  -> %d Gaussians after clipping (%.1f deg)",
             gaussians.mean_vectors.shape[1], clip_degrees,
         )
+
+        # Store pre-alignment median radius for global restore later
+        original_median_radii.append(float(torch.median(
+            torch.norm(gaussians.mean_vectors, dim=-1),
+        ).item()))
 
         # ------------------------------------------------------------------
         # 8. DA360 alignment
@@ -852,7 +917,7 @@ def convert_sharp360(
             effective_focal_y,
             view,
         )
-        gaussians = align_gaussians_to_reference(
+        gaussians, med_scale, n_samples = align_gaussians_to_reference(
             gaussians,
             ref_disp_view,
             effective_focal_x,
@@ -860,6 +925,10 @@ def convert_sharp360(
             effective_width,
             effective_height,
             grid_resolution=8,
+        )
+        LOGGER.info(
+            "  Aligned %s: median_scale=%.4f (%d samples)",
+            view.name, med_scale, n_samples,
         )
 
         # ------------------------------------------------------------------
@@ -890,18 +959,20 @@ def convert_sharp360(
     # ------------------------------------------------------------------
     # 11. Global scale restore
     # ------------------------------------------------------------------
-    # Normalize scene so that the median distance from origin ~ 5 meters
-    # (matching DA360's median-based normalization)
-    distances = torch.linalg.norm(merged.mean_vectors[0], dim=-1)
-    median_dist = distances.median().item()
-    if median_dist > 1e-4:
-        target_median = 5.0
-        global_scale = target_median / median_dist
-        merged = scale_gaussians(merged, global_scale)
-        LOGGER.info(
-            "Global scale: %.4f (median dist %.2f -> %.2f)",
-            global_scale, median_dist, target_median,
-        )
+    # Restore median scene radius to the pre-alignment value so alignment
+    # doesn't shrink/grow the overall scene (matches SHARP_360_to_Splat reference)
+    if original_median_radii:
+        original_scene_median = float(np.median(original_median_radii))
+        current_median = float(torch.median(
+            torch.norm(merged.mean_vectors, dim=-1),
+        ).item())
+        if current_median > 1e-8:
+            global_scale = original_scene_median / current_median
+            merged = scale_gaussians(merged, global_scale)
+            LOGGER.info(
+                "Global scale restore: %.4f (%.2f -> %.2f median radius)",
+                global_scale, current_median, original_scene_median,
+            )
 
     # ------------------------------------------------------------------
     # 12. PLY export via SHARP's save_ply()

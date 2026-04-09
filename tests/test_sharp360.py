@@ -127,10 +127,12 @@ class TestBuildExtractionLayout:
         assert len(layout.views) == 6
 
     def test_image_dimensions(self):
-        """Layout image dimensions should match face_size."""
-        layout = build_extraction_layout(768, 2048, side_count=4)
-        assert layout.image_width == 768
-        assert layout.image_height == 768
+        """Width is widened for overlap; height = panorama_height."""
+        layout = build_extraction_layout(768, 2048, side_count=4, overlap_degrees=10.0)
+        # Width should be >= face_size (widened for overlap)
+        assert layout.image_width >= 768
+        # Height = panorama_height (tall faces for vertical coverage)
+        assert layout.image_height == 2048
 
     def test_focal_length_positive(self):
         """Focal length should be positive and finite."""
@@ -163,7 +165,7 @@ class TestExtractPerspectiveView:
     """Tests for extract_perspective_view()."""
 
     def test_output_shape(self):
-        """Output should match the requested (height, width, 3)."""
+        """Output should match (layout.image_height, layout.image_width, 3)."""
         panorama = np.random.randint(0, 256, (512, 1024, 3), dtype=np.uint8)
         view = make_horizon_view(0, 4)
         layout = build_extraction_layout(256, 512, side_count=4)
@@ -171,7 +173,7 @@ class TestExtractPerspectiveView:
             panorama, layout.image_width, layout.image_height,
             layout.focal_px, layout.focal_y_px, view,
         )
-        assert face.shape == (256, 256, 3)
+        assert face.shape == (layout.image_height, layout.image_width, 3)
 
     def test_uniform_panorama_gives_uniform_face(self):
         """A solid-color panorama should produce a solid-color face."""
