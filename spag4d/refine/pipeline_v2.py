@@ -588,6 +588,7 @@ def refine_splat_v2(
             iters_per_view=config.iters_per_view,
             kf_iters=config.kf_iters,
             protect_original_count=initial_gaussian_count,
+            tier2_weight=config.tier2_weight,
         )
         total_iters = config.iters_per_view * len(tier2_images) + config.kf_iters
     else:
