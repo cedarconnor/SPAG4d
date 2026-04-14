@@ -22,9 +22,8 @@ def sky_mask_hsv(image_rgb: np.ndarray) -> np.ndarray:
     bright = value > 0.75
     low_sat = saturation < 0.25
 
-    # Weight toward upper hemisphere of ERP
-    row_weight = np.linspace(1.0, 0.0, H)[:, np.newaxis]
-    upper_half = row_weight > 0.5
+    # Restrict to upper half of ERP image
+    upper_half = np.arange(H)[:, np.newaxis] < (H // 2)
 
     return (bright & low_sat & upper_half).astype(bool)
 
@@ -44,6 +43,8 @@ def specular_mask(image_rgb: np.ndarray, window: int = 9) -> np.ndarray:
     high_lum = gray > 0.85
 
     # Local texture variance via blur difference
+    if window % 2 == 0:
+        window += 1
     blur = cv2.GaussianBlur(gray, (window, window), 0)
     var = np.abs(gray - blur)
     low_var = var < 0.02
