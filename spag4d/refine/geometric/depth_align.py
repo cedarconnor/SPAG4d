@@ -43,9 +43,8 @@ def align_depth_irls(
         weights = np.where(abs_res <= huber_delta, 1.0, huber_delta / (abs_res + 1e-10))
 
         if mode == "scale_shift":
-            W = np.diag(weights)
             A = np.column_stack([d, np.ones(n)])
-            AtWA = A.T @ W @ A
+            AtWA = A.T @ (weights[:, None] * A)
             AtWb = A.T @ (weights * r)
             try:
                 params = np.linalg.solve(AtWA, AtWb)
