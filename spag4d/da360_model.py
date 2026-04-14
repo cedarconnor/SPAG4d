@@ -133,7 +133,6 @@ class DA360Model:
             gdown.download(
                 url=DA360_CONFIG["gdrive_folder"],
                 output=str(DA360_CACHE_DIR),
-                fuzzy=True,
                 quiet=False,
             )
             if cache_path.exists():
