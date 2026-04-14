@@ -94,7 +94,7 @@
                     <li><strong>Adjust</strong> parameters below (defaults work well for most scenes)</li>
                     <li><strong>Convert</strong> — runs depth estimation + SPAG conversion (~1-2s)</li>
                     <li><strong>Preview</strong> in the 3D viewer: left-click orbit, right-click pan, scroll zoom</li>
-                    <li><strong>Refine</strong> (optional) — GSFix3D disocclusion repair</li>
+                    <li><strong>Refine</strong> (optional) — OmniRoam v2 disocclusion repair</li>
                     <li><strong>Download</strong> as PLY for Blender, SuperSplat, or any 3DGS viewer</li>
                 </ol>
 
@@ -127,21 +127,21 @@
                     <dd>Global depth multiplier. Adjusts overall scene scale.</dd>
                 </dl>
 
-                <h3>Splat Refinement (GSFix3D)</h3>
-                <p>After conversion, use refinement to fill disocclusion holes. The pipeline generates novel-view cameras, detects holes via alpha thresholding, repairs them with a scene-adapted diffusion model (GSFix3D), then optimizes the 3DGS via differentiable rendering.</p>
+                <h3>Splat Refinement (OmniRoam v2)</h3>
+                <p>After conversion, use refinement to fill disocclusion holes. OmniRoam generates trajectory-coherent novel views, then optimizes the 3DGS to incorporate them.</p>
                 <dl class="help-params">
-                    <dt>Cameras</dt>
-                    <dd>Number of novel-view cameras. 36 = 12 directions x 3 depths. More cameras detect more holes but take longer.</dd>
+                    <dt>Trajectories</dt>
+                    <dd>Auto = gap-directed (recommended). All = all cardinal directions. Forward/Right etc. for targeted coverage.</dd>
 
                     <dt>Rounds</dt>
-                    <dd>Refinement iterations. Each round re-renders, finds remaining holes, and repairs them. Stops early when holes &lt; 2%.</dd>
+                    <dd>Refinement iterations. Each round generates new views and re-optimizes. Stops early when holes &lt; 2%.</dd>
 
-                    <dt>Finetune Steps</dt>
-                    <dd>GSFixer scene adaptation. 500 steps (~5 min) teaches the model this scene's appearance before repairing holes.</dd>
+                    <dt>Tier-2 Weight</dt>
+                    <dd>Weight for OmniRoam pseudo-views during optimization. Lower = more conservative. Range 0.05–0.50.</dd>
                 </dl>
 
                 <div class="tip">
-                    Quick Tips: Start with 36 cameras and 1 round for a quick test. The pipeline auto-detects which cameras have significant holes and only repairs those. Use 3 rounds for thorough coverage.
+                    Quick Tips: Start with Auto trajectories and 1 round for a quick test. Use 3 rounds for thorough coverage.
                 </div>
             </div>
 
@@ -259,13 +259,7 @@
             <!-- Refinement Controls -->
             <div id="refine-panel" class="controls-panel" style="display: none;">
                 <div class="actions-row">
-                    <span class="section-label">Splat Refinement</span>
-                    <div class="param-group" title="Refinement backend: GSFix3D (diffusion inpainting) or OmniRoam (trajectory-coherent video fill)">
-                        <select id="refine-backend" style="font-size: 0.75rem; padding: 2px 4px;">
-                            <option value="gsfix3d" selected>GSFix3D</option>
-                            <option value="omniroam">OmniRoam v2</option>
-                        </select>
-                    </div>
+                    <span class="section-label">Splat Refinement <strong>OmniRoam v2</strong></span>
                     <button id="refine-btn" class="action-btn" disabled>
                         <span class="btn-icon">🔧</span>
                         Refine
@@ -275,33 +269,7 @@
                         Refined PLY
                     </button>
                 </div>
-                <div class="params-row" id="gsfix3d-params">
-                    <div class="param-group" title="Number of novel-view cameras for hole detection. More = better coverage, slower.">
-                        <label for="num-cameras">Cameras</label>
-                        <select id="num-cameras">
-                            <option value="12">12</option>
-                            <option value="24">24</option>
-                            <option value="36" selected>36</option>
-                            <option value="48">48</option>
-                        </select>
-                    </div>
-                    <div class="param-group" title="Number of refinement iterations. Each round detects remaining holes and repairs them.">
-                        <label for="max-rounds">Rounds</label>
-                        <select id="max-rounds">
-                            <option value="1">1</option>
-                            <option value="2">2</option>
-                            <option value="3" selected>3</option>
-                        </select>
-                    </div>
-                    <details class="param-group advanced-params">
-                        <summary>Advanced</summary>
-                        <div class="param-group" title="GSFixer scene adaptation steps. More = better quality, slower (~1min per 100 steps).">
-                            <label for="finetune-steps">Finetune Steps</label>
-                            <input type="number" id="finetune-steps" value="500" min="100" max="2000" step="100">
-                        </div>
-                    </details>
-                </div>
-                <div class="params-row" id="omniroam-params" style="display: none;">
+                <div class="params-row" id="omniroam-params">
                     <div class="param-group" title="Trajectory selection: auto (gap-directed), all (4 cardinal), or specific presets.">
                         <label for="trajectory-mode">Trajectories</label>
                         <select id="trajectory-mode">

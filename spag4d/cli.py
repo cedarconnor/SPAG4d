@@ -37,12 +37,6 @@ def main():
 @click.option('--device', default='cuda', help='Device: cuda, cpu, mps')
 @click.option('--quiet', is_flag=True, help='Suppress progress output')
 @click.option('--mock-dap', is_flag=True, help='Use mock DAP model (for testing)')
-@click.option('--refine', is_flag=True, default=False,
-              help='Run GSFix3D disocclusion repair after conversion')
-@click.option('--refine-iterations', default=3, type=int,
-              help='Max refinement iterations (default: 3)')
-@click.option('--refine-cameras', default=36, type=int,
-              help='Novel-view cameras for hole detection (default: 36)')
 @click.option('--generator', type=click.Choice(['da360', 'dap', 'sharp360']),
               default=None, help='Generator mode: da360, dap, or sharp360 (overrides --depth-model)')
 @click.option('--side-count', type=int, default=6,
@@ -67,9 +61,6 @@ def convert(
     device: str,
     quiet: bool,
     mock_dap: bool,
-    refine: bool,
-    refine_iterations: int,
-    refine_cameras: int,
     generator: str,
     side_count: int,
     seedvr2_upscale: bool,
@@ -153,37 +144,9 @@ def convert(
             click.echo(f"Time: {result.processing_time:.2f}s")
             click.echo(f"Depth range: {result.depth_range[0]:.2f}m - {result.depth_range[1]:.2f}m")
 
-        if refine:
-            if not quiet:
-                click.echo("Running GSFix3D refinement...")
-
-            from .refine import refine_splat
-            import numpy as np
-
-            depth_npy_path = str(output_path).replace('.ply', '_depth.npy')
-            if not Path(depth_npy_path).exists():
-                click.echo("Warning: depth .npy not found, skipping refinement", err=True)
-            else:
-                depth_map = np.load(depth_npy_path)
-                refined_path = str(output_path).replace('.ply', '_refined.ply')
-
-                refine_result = refine_splat(
-                    ply_path=str(output_path),
-                    panorama_path=str(input_path),
-                    depth_map=depth_map,
-                    max_iterations=refine_iterations,
-                    num_cameras=refine_cameras,
-                    output_path=refined_path,
-                )
-
-                if not quiet:
-                    click.echo(f"Refined: holes {refine_result['initial_hole_fraction']:.2%}"
-                               f" -> {refine_result['final_hole_fraction']:.2%}")
-                    click.echo(f"Saved to: {refined_path}")
-
 
 @main.command('download-models')
-@click.option('--model', type=click.Choice(['dap', 'da360', 'gsfix3d', 'sharp', 'seedvr2', 'all']),
+@click.option('--model', type=click.Choice(['dap', 'da360', 'sharp', 'seedvr2', 'all']),
               default='all', help='Which model weights to download')
 @click.option('--verify', is_flag=True, help='Verify downloaded weights')
 def download_models(model: str, verify: bool):
@@ -215,22 +178,6 @@ def download_models(model: str, verify: bool):
         except Exception as e:
             click.echo(f"DA360 download failed: {e}", err=True)
             if model == 'da360':
-                raise click.Abort()
-
-    if model in ('gsfix3d', 'all'):
-        click.echo("Downloading GSFix3D checkpoint...")
-        try:
-            from huggingface_hub import snapshot_download
-            path = snapshot_download(
-                "goldoak1421/gsfixer-full-replica-room1",
-                local_dir="pretrained/gsfix3d",
-            )
-            click.echo(f"GSFix3D checkpoint cached at: {path}")
-        except ImportError:
-            click.echo("huggingface_hub not installed. Install with: pip install huggingface-hub", err=True)
-        except Exception as e:
-            click.echo(f"GSFix3D download failed: {e}", err=True)
-            if model == 'gsfix3d':
                 raise click.Abort()
 
     if model in ('sharp', 'all'):
