@@ -2,6 +2,7 @@
 import numpy as np
 import pytest
 from spag4d.refine.geometric.depth_convention import (
+    assert_is_z_depth,
     is_nearer_than_rendered,
     radial_to_z,
     erp_pixel_to_ray,
@@ -49,3 +50,17 @@ def test_erp_pixel_to_ray_center():
     rays = erp_pixel_to_ray(u, v, H, W)
     # Center pixel → forward ray (0, 0, 1) in camera space
     np.testing.assert_allclose(rays[0], [0.0, 0.0, 1.0], atol=1e-5)
+
+
+def test_assert_is_z_depth_raises_on_radial_form():
+    # Simulate radial depth at high latitude: values ~2x the z reference
+    depth = np.array([10.0, 12.0, 9.0])
+    ref = np.array([5.0, 6.0, 4.5])  # max ratio = 10/5 = 2.0 > 1.5
+    with pytest.raises(ValueError, match="radial form"):
+        assert_is_z_depth(depth, ref)
+
+
+def test_assert_is_z_depth_passes_on_z_form():
+    depth = np.array([5.0, 6.0, 4.5])
+    ref = np.array([5.0, 6.0, 4.5])
+    assert_is_z_depth(depth, ref)  # should not raise

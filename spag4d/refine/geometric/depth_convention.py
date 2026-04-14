@@ -63,6 +63,12 @@ def assert_is_z_depth(depth: np.ndarray, rendered_z_reference: np.ndarray) -> No
     """Raises ValueError if depth looks like radial depth instead of z-depth.
 
     Heuristic: if max(depth) > 1.5 * max(rendered_z_reference) it's likely radial.
+
+    Note: This is a coarse sanity guard for gross accidents only (e.g., raw DAP output
+    passed without radial→z conversion). It is NOT reliable when the scene's deepest
+    point is below ~55° latitude (ratio between radial and z is < 1.5 there).
+    If depth is all-NaN, this check passes silently (NaN signals missing data).
+    Do not rely on this as an authoritative convention validator.
     """
     ratio = np.nanmax(depth) / (np.nanmax(rendered_z_reference) + 1e-8)
     if ratio > 1.5:
