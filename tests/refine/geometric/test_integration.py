@@ -29,7 +29,7 @@ def test_empty_omniroam_passthrough(tmp_path):
     if not Path(panorama).exists():
         pytest.skip("No input panorama for this PLY")
 
-    config = GeometricRefineConfig(max_frames=0, color_polish_steps=0)
+    config = GeometricRefineConfig(max_frames=0)
     config.color_polish.steps = 0
     out_path = str(tmp_path / "out.ply")
 
