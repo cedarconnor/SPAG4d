@@ -664,3 +664,92 @@ def refine_splat_v2(
     )
 
     return result
+
+
+def _run_omniroam_stages(
+    panorama_path: str,
+    ply_path: str,
+    trajectory_mode: str = "auto",
+    upscale_backend: str = "seedvr2",
+    max_frames: int = 81,
+    progress_callback=None,
+) -> dict:
+    """Extract OmniRoam frames and poses for use by the geometric refine pipeline.
+
+    Returns dict with keys:
+      frames: list of (H, W, 3) float32 [0,1] arrays
+      poses: (N, 4, 4) float32 camera-to-world transforms
+    """
+    import numpy as np
+    from pathlib import Path
+    import hashlib
+    import glob
+
+    # If max_frames is 0, return empty result immediately
+    if max_frames == 0:
+        return {"frames": [], "poses": np.zeros((0, 4, 4), dtype=np.float32)}
+
+    try:
+        from .omniroam_adapter import run_omniroam_wsl, extract_video_frames
+        from .omniroam_config import OmniRoamConfig
+        from .omniroam_trajectory import generate_omniroam_trajectory
+    except ImportError as e:
+        import logging
+        logging.getLogger("spag4d.refine.pipeline_v2").warning(
+            "[_run_omniroam_stages] OmniRoam dependencies not available: %s", e
+        )
+        return {"frames": [], "poses": np.zeros((0, 4, 4), dtype=np.float32)}
+
+    config = OmniRoamConfig(
+        trajectory_mode=trajectory_mode,
+        upscale_backend=upscale_backend,
+        num_frames=max_frames,
+    )
+
+    run_hash = hashlib.md5(ply_path.encode()).hexdigest()[:8]
+    work_dir = Path(ply_path).parent / f"_omniroam_work_{run_hash}"
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    trajectories = ["backward", "right", "forward", "left"]
+
+    all_frames = []
+    all_poses = []
+
+    for preset in trajectories:
+        traj_dir = work_dir / preset
+        traj_dir.mkdir(parents=True, exist_ok=True)
+
+        # Check if video already exists (reuse from prior run)
+        existing = list(traj_dir.rglob("generated.mp4"))
+        if not existing:
+            try:
+                run_omniroam_wsl(
+                    image_path=panorama_path,
+                    output_dir=str(traj_dir),
+                    preset=preset,
+                    config=config,
+                )
+            except Exception as e:
+                import logging
+                logging.getLogger("spag4d.refine.pipeline_v2").warning(
+                    "[_run_omniroam_stages] OmniRoam failed for preset %s: %s", preset, e
+                )
+                continue
+            existing = glob.glob(str(traj_dir / "**" / "generated.mp4"), recursive=True)
+
+        if not existing:
+            continue
+
+        frames = extract_video_frames(existing[0])
+        _, translations = generate_omniroam_trajectory(
+            preset=preset, num_video_frames=len(frames)
+        )
+        # Build identity pose + translation for each frame
+        for frame, trans in zip(frames, translations):
+            pose = np.eye(4, dtype=np.float32)
+            pose[:3, 3] = trans
+            all_frames.append(frame)
+            all_poses.append(pose)
+
+    poses = np.stack(all_poses) if all_poses else np.zeros((0, 4, 4), dtype=np.float32)
+    return {"frames": all_frames, "poses": poses}
