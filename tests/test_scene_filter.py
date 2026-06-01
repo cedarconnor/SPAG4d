@@ -348,3 +348,49 @@ class TestPoleDensityUniformity:
 
         # CV < 0.5 means reasonable uniformity (perfect ERP has CV → ∞ without thinning)
         assert cv < 0.5, f"Latitude density CV={cv:.3f} is too high (pole blob present)"
+
+
+# ── Grazing-angle clip with PaGeR world-frame normals ───────────────────────
+
+class TestGrazingAngleNormals:
+    """prune_grazing_angle uses real normals when supplied, else the depth-gradient
+    proxy. Converter ray frame: view_ray = means / ||means||. |dot(view_ray, normal)|
+    is ~1 face-on, ~0 grazing; keep iff |dot| > cos(max_angle_deg)."""
+
+    def _gaussians(self, means):
+        n = means.shape[0]
+        return {
+            "means": means,
+            "scales": torch.ones(n, 3),
+            "quats": torch.zeros(n, 4),
+            "opacities": torch.zeros(n),
+            "colors": torch.zeros(n, 3),
+        }
+
+    def test_face_on_kept_edge_on_removed(self):
+        from spag4d.scene_filter import prune_grazing_angle
+
+        H, W = 64, 128
+        means = torch.tensor([[5.0, 0.0, 0.0],   # view_ray +x
+                              [0.0, 5.0, 0.0]],   # view_ray +y
+                             dtype=torch.float32)
+        gaussians = self._gaussians(means)
+        depth = np.full((H, W), 5.0, dtype=np.float32)
+        normals = np.zeros((H, W, 3), dtype=np.float32)
+        normals[..., 0] = 1.0  # +x everywhere
+
+        out = prune_grazing_angle(gaussians, depth, stride=1,
+                                  max_angle_deg=60.0, normals=normals)
+        # g0: |dot|=1 kept; g1: |dot|=0 removed
+        assert out["means"].shape[0] == 1
+        assert torch.allclose(out["means"][0], means[0])
+
+    def test_normals_none_falls_back_to_gradient(self):
+        from spag4d.scene_filter import prune_grazing_angle
+
+        H, W = 64, 128
+        means = torch.tensor([[5.0, 0.0, 0.0]], dtype=torch.float32)
+        gaussians = self._gaussians(means)
+        depth = np.full((H, W), 5.0, dtype=np.float32)  # flat -> no gradient pruning
+        out = prune_grazing_angle(gaussians, depth, stride=1, max_angle_deg=60.0)
+        assert out["means"].shape[0] == 1

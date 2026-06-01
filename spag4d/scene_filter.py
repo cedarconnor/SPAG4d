@@ -370,6 +370,7 @@ def prune_grazing_angle(
     depth_map: np.ndarray,
     stride: int = 2,
     max_angle_deg: float = 80.0,
+    normals: np.ndarray | None = None,
 ) -> dict:
     """
     Remove Gaussians at extreme grazing angles where the depth surface
@@ -430,10 +431,20 @@ def prune_grazing_angle(
     px_row = np.clip((phi / np.pi * H).astype(int), 0, H - 1)
     px_col = np.clip((theta / (2 * np.pi) * W).astype(int), 0, W - 1)
 
-    # Sample relative gradient at each Gaussian's pixel
-    sampled_grad = relative_grad[px_row, px_col]
-
-    keep_mask_np = sampled_grad < max_relative_grad
+    # Decide which Gaussians to keep
+    if normals is not None:
+        # Direct surface orientation (PaGeR world-frame normals share the
+        # converter ray frame, view_ray = means / ||means||). |dot| ~ 1 when the
+        # surface faces the camera, ~ 0 when it's edge-on (grazing). Keep when the
+        # surface is not too edge-on: |dot| > cos(max_angle_deg).
+        view_ray = means / np.maximum(r[:, None], 1e-8)
+        sampled_normal = normals[px_row, px_col]
+        dot = np.abs(np.sum(view_ray * sampled_normal, axis=1))
+        keep_mask_np = dot > np.cos(np.radians(max_angle_deg))
+    else:
+        # Fall back to the depth-gradient proxy.
+        sampled_grad = relative_grad[px_row, px_col]
+        keep_mask_np = sampled_grad < max_relative_grad
     keep_mask = torch.from_numpy(keep_mask_np).to(gaussians['means'].device)
 
     pruned = {}
