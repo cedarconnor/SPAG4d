@@ -31,13 +31,16 @@ See [INSTALL.md](INSTALL.md) for the full walkthrough and troubleshooting.
 
 ## Generators
 
-SPAG-4D offers three ways to convert a panorama into Gaussians:
+SPAG-4D offers four ways to convert a panorama into Gaussians:
 
 | Generator | How It Works | Speed | Quality | VRAM |
 |-----------|-------------|-------|---------|------|
 | **DA360** (default) | DA360 depth estimation + SPAG spherical projection | ~2s | Good | ~2 GB |
 | **DAP** | DAP metric depth + SPAG spherical projection | ~3s | Good | ~3 GB |
 | **SHARP 360** | Per-face SHARP prediction + DA360 alignment + merge | ~30s | Higher detail | ~8 GB |
+| **PaGeR** | PaGeR (DA3 cubemap) depth + learned sky/normals + SPAG projection | ~5s | Strongest outdoor depth | ~12 GB |
+
+> **PaGeR is non-commercial only** (weights are CC BY-NC 4.0, inherited from the DA3 ViT-Giant backbone). DA360/DAP remain the commercial-safe defaults. It also reuses the depth-based path below, adding a learned sky mask (`--pager-use-sky`) and world-frame normals (`--pager-use-normals`). Detail is capped at the model's 504-px cube faces (≈2K effective ERP). Pinned upstream commit `99188f2`.
 
 ### DA360 / DAP (Depth-Based)
 
@@ -104,6 +107,11 @@ python -m spag4d convert panorama.jpg output.ply --generator sharp360
 
 # SHARP 360 with 8 faces and SeedVR2 upscale
 python -m spag4d convert panorama.jpg output.ply --generator sharp360 --side-count 8 --seedvr2-upscale
+
+# PaGeR generator (non-commercial weights; download first: download-models --model pager)
+python -m spag4d convert panorama.jpg output.ply --generator pager
+python -m spag4d convert panorama.jpg output.ply --generator pager --pager-use-sky --pager-use-normals
+python -m spag4d convert panorama.jpg output.ply --generator pager --pager-metric
 
 # DA360 with max quality (one Gaussian per pixel)
 python -m spag4d convert panorama.jpg output.ply --stride 1
@@ -431,4 +439,4 @@ scripts/
 
 ## License
 
-MIT. Note: SHARP model weights are subject to Apple's model license (noncommercial research only). SHARP source code is Apple MIT-equivalent. OmniRoam is subject to Adobe Research License (noncommercial research only). SeedVR2 is MIT. These integrations are optional modules -- core SPAG-4D remains MIT.
+MIT. Note: SHARP model weights are subject to Apple's model license (noncommercial research only). SHARP source code is Apple MIT-equivalent. OmniRoam is subject to Adobe Research License (noncommercial research only). PaGeR source code is Apache-2.0 but its model weights are CC BY-NC 4.0 (noncommercial / evaluation only, inherited from the Depth Anything 3 ViT-Giant backbone). SeedVR2 is MIT. These integrations are optional modules -- core SPAG-4D remains MIT.
