@@ -49,6 +49,11 @@ class SPAG4D:
         # generator overrides depth_model when provided
         self.generator = generator or depth_model
 
+        # PaGeR options (set per-call by convert()); default off so da360/dap unaffected.
+        self._pager_metric = False
+        self._pager_use_sky = False
+        self._pager_use_normals = False
+
         # Eagerly load the default depth model only for non-sharp360 generators
         if self.generator in ("da360", "dap"):
             self._get_depth_model(self.generator)
@@ -61,6 +66,9 @@ class SPAG4D:
         if self.use_mock_dap:
             from .dap_model import MockDAPModel
             model = MockDAPModel.load(device=self.device)
+        elif name == "pager":
+            from .pager_model import PaGeRModel
+            model = PaGeRModel.load(device=self.device, metric=self._pager_metric)
         elif name == "da360":
             from .da360_model import DA360Model
             model = DA360Model.load(device=self.device)
@@ -91,6 +99,9 @@ class SPAG4D:
         generator: Optional[str] = None,
         side_count: int = 6,
         seedvr2_upscale: bool = False,
+        pager_metric: bool = False,
+        pager_use_sky: bool = False,
+        pager_use_normals: bool = False,
     ) -> ConversionResult:
         """
         Convert equirectangular panorama to Gaussian splat PLY.
@@ -118,6 +129,11 @@ class SPAG4D:
         from .ply_writer import save_ply_gsplat
 
         start_time = time.time()
+
+        # PaGeR per-call options (read by _get_depth_model and the depth path below).
+        self._pager_metric = pager_metric
+        self._pager_use_sky = pager_use_sky
+        self._pager_use_normals = pager_use_normals
 
         # Load and validate image
         img = Image.open(input_path).convert('RGB')
@@ -158,20 +174,32 @@ class SPAG4D:
                 panorama_size=(W, H),
             )
 
-        # Estimate depth
-        dm_name = depth_model or self.default_depth_model
+        # Estimate depth. active_generator resolves --generator/--depth-model;
+        # use it directly so "pager" routes to the PaGeR backend.
+        dm_name = depth_model or active_generator or self.default_depth_model
         depth_engine = self._get_depth_model(dm_name)
         print(f"[SPAG4D] Running {dm_name.upper()} depth estimation...", flush=True)
         t_depth = time.time()
         with torch.inference_mode():
-            depth_raw, _ = depth_engine.predict(image_tensor)
+            depth_raw, pred_mask = depth_engine.predict(image_tensor)
         depth = depth_raw * global_scale
         print(f"[SPAG4D] Depth estimation complete in {time.time() - t_depth:.1f}s")
+
+        # PaGeR optional side-channels (None for da360/dap and when the flags are off).
+        pager_sky = None
+        pager_normals = None
+        if dm_name == "pager":
+            nr = getattr(depth_engine, "native_resolution", None)
+            print(f"[SPAG4D] PaGeR native depth {nr} -> emitted at {tuple(depth.shape)}")
+            if self._pager_use_sky and pred_mask is not None:
+                pager_sky = pred_mask.detach().cpu().numpy()
+            if self._pager_use_normals and getattr(depth_engine, "last_normals", None) is not None:
+                pager_normals = depth_engine.last_normals.detach().cpu().numpy()
 
         # Auto-compute scene-relative defaults for any None parameters
         depth_np = depth.cpu().numpy()
         from .scene_analysis import compute_scene_defaults
-        scene_defaults = compute_scene_defaults(depth_np, image_height=H)
+        scene_defaults = compute_scene_defaults(depth_np, image_height=H, sky_mask=pager_sky)
 
         if depth_min is None:
             depth_min = scene_defaults["depth_min"]
@@ -214,6 +242,7 @@ class SPAG4D:
                 depth_np = depth.detach().cpu().numpy() if hasattr(depth, 'detach') else depth
                 gaussians = prune_grazing_angle(
                     gaussians, depth_np, stride=stride, max_angle_deg=grazing_angle,
+                    normals=pager_normals,
                 )
             except Exception as e:
                 import warnings
