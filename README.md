@@ -256,7 +256,7 @@ SeedVR2 runs as a native Windows subprocess -- no WSL2 required.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `generator` | `da360` | Generator backend: `da360`, `dap`, or `sharp360` |
+| `generator` | `da360` | Generator backend: `da360`, `dap`, `sharp360`, or `pager` |
 
 ### DA360/DAP Settings (Depth-Based)
 
@@ -277,6 +277,16 @@ SeedVR2 runs as a native Windows subprocess -- no WSL2 required.
 |---------|---------|-------------|
 | `side_count` | `6` | Number of horizon perspective views (4, 6, 8, 10, or 12) |
 | `seedvr2_upscale` | `false` | Upscale face images with SeedVR2 before SHARP prediction |
+
+### PaGeR Settings (non-commercial)
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `pager_metric` | `false` | Use the metric scale head instead of scale-invariant depth |
+| `pager_use_sky` | `false` | Use the learned sky mask to make the auto depth-range fit robust outdoors |
+| `pager_use_normals` | `false` | Use world-frame surface normals for the grazing-angle clip (instead of the depth-gradient proxy) |
+
+Indoor/outdoor is auto-detected (CLIP router) — no setting. Requires `pip install -r requirements-pager.txt` and `download-models --model pager` (~5.7 GB, CC BY-NC 4.0). Reuses the DA360/DAP depth-based pipeline above for everything else.
 
 ### GSFix3D Refinement Settings
 
@@ -312,8 +322,9 @@ SeedVR2 runs as a native Windows subprocess -- no WSL2 required.
 |-------|---------|-------------|
 | **DA360** | Yes | Depth Anything V2 with circular-padding DPT decoder. Seamless 360 depth with no boundary artifacts. |
 | **DAP** | No | Depth Any Panorama. Outputs metric radial depth. |
+| **PaGeR** | No | DA3 cubemap multi-view geometry. Strongest outdoor depth + learned sky/normals. Non-commercial weights (CC BY-NC 4.0). |
 
-Both models download weights automatically on first use (~1.3-1.5 GB each). DA360 is also used internally by SHARP 360 for inter-face depth alignment.
+DA360/DAP download weights automatically on first use (~1.3-1.5 GB each). DA360 is also used internally by SHARP 360 for inter-face depth alignment. PaGeR is opt-in: `pip install -r requirements-pager.txt` then `download-models --model pager` (~5.7 GB).
 
 ---
 

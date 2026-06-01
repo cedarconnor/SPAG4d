@@ -113,6 +113,17 @@ echo [7/9] Installing refinement dependencies (diffusers, transformers)...
 !PIP! install "diffusers>=0.37.0" transformers accelerate peft gsplat
 
 echo.
+echo [+] Installing optional PaGeR backend dependencies (non-commercial)...
+!PIP! install -r requirements-pager.txt
+if errorlevel 1 (
+    echo    [WARN] PaGeR deps failed; the optional "--generator pager" backend won't work.
+) else (
+    echo    [OK] PaGeR deps installed. Weights are NOT downloaded by default
+    echo         ^(prs-eth/PaGeR, ~5.7 GB, CC BY-NC 4.0 non-commercial^).
+    echo         To enable it:  python -m spag4d download-models --model pager
+)
+
+echo.
 echo [8/9] Installing Python dev headers for gsplat CUDA compilation...
 "%PYTHON_DIR%\python.exe" -c "import urllib.request,zipfile,io,os; url='https://www.nuget.org/api/v2/package/python/3.11.9'; print('Downloading Python 3.11.9 headers...'); data=urllib.request.urlopen(urllib.request.Request(url,headers={'User-Agent':'SPAG4D'})).read(); z=zipfile.ZipFile(io.BytesIO(data)); inc=r'%PYTHON_DIR%\Include'; lib=r'%PYTHON_DIR%\libs'; os.makedirs(inc,exist_ok=True); os.makedirs(lib,exist_ok=True); [open(os.path.join(inc,n[len('tools/include/'):]),'wb').write(z.read(n)) for n in z.namelist() if n.startswith('tools/include/') and not n.endswith('/')]; [open(os.path.join(lib,n[len('tools/libs/'):]),'wb').write(z.read(n)) for n in z.namelist() if n.startswith('tools/libs/') and not n.endswith('/')]; print('Done: headers + libs installed')"
 if errorlevel 1 (
@@ -167,7 +178,7 @@ echo.
 echo   Run 'run.bat' to start SPAG-4D.
 echo   Opens http://localhost:7860 in your browser.
 echo.
-echo   Depth models: DAP + DA360
+echo   Depth models: DAP + DA360 (+ optional PaGeR, non-commercial)
 echo   Refinement: Klein 9B synthesis (weights download on first use)
 echo ==================================================
 echo.
