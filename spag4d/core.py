@@ -174,9 +174,13 @@ class SPAG4D:
                 panorama_size=(W, H),
             )
 
-        # Estimate depth. active_generator resolves --generator/--depth-model;
-        # use it directly so "pager" routes to the PaGeR backend.
-        dm_name = depth_model or active_generator or self.default_depth_model
+        # Estimate depth. An explicit generator is authoritative (it overrides the
+        # depth_model default) so "pager"/"dap" route correctly even when callers
+        # like the web API always send depth_model="da360".
+        if active_generator in ("da360", "dap", "pager"):
+            dm_name = active_generator
+        else:
+            dm_name = depth_model or self.default_depth_model
         depth_engine = self._get_depth_model(dm_name)
         print(f"[SPAG4D] Running {dm_name.upper()} depth estimation...", flush=True)
         t_depth = time.time()

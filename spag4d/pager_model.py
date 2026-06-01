@@ -87,9 +87,18 @@ class PaGeRModel:
     @classmethod
     def load(cls, device: torch.device = torch.device("cuda"),
              metric: bool = False) -> "PaGeRModel":
-        """Lazy-load the unified prs-eth/PaGeR checkpoint from the HF cache."""
-        cfg = _load_cfg()
-        pager = build_pager(PAGER_REPO, cfg=cfg, device=device)
+        """Lazy-load the unified prs-eth/PaGeR checkpoint from the HF cache.
+
+        Resolve the local snapshot directory and pass that to Pager rather than
+        the bare repo id: upstream wraps the arg in Path(), which on Windows
+        mangles "prs-eth/PaGeR" into "prs-eth\\PaGeR" and breaks the HF lookup.
+        """
+        from huggingface_hub import snapshot_download
+        from omegaconf import OmegaConf
+
+        local_dir = snapshot_download(PAGER_REPO, cache_dir=str(PAGER_CACHE_DIR))
+        cfg = OmegaConf.load(str(Path(local_dir) / "config.yaml"))
+        pager = build_pager(local_dir, cfg=cfg, device=device)
         pager.get_intrinsics_extrinsics(
             image_size=cfg.face_size, fov=getattr(cfg, "cube_fov", 90.0))
         # Widen the depth clamp so outdoor scenes aren't truncated at the 75 m indoor default.
