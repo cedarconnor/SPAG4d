@@ -209,6 +209,9 @@ def _run_seedvr2_subprocess(
     """
     logger.debug("SeedVR2 cmd: %s", " ".join(str(c) for c in cmd))
 
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -217,6 +220,7 @@ def _run_seedvr2_subprocess(
         bufsize=1,
         encoding="utf-8",
         errors="replace",
+        env=env,
     )
 
     tail_lines: list = []
