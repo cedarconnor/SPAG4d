@@ -51,6 +51,8 @@ server_log.txt
 *.safetensors
 models/
 checkpoints/
+pretrained/
+third_party/
 
 # Output files
 *.ply
@@ -100,8 +102,12 @@ spag4d/da360_arch/DA360/
 ml-sharp/
 !spag4d/sharp_arch/ml-sharp/
 
-# Removed v1 submodule
+# Removed v1 submodule (root-level only); keep the vendored PaGeR src/ tracked
 src/
+!spag4d/pager_arch/PaGeR/src/
+!spag4d/pager_arch/PaGeR/src/**
+# ...but never the bytecode caches inside it
+spag4d/pager_arch/PaGeR/src/**/__pycache__/
 
 # Large binary test data
 TestImage/*.npy
