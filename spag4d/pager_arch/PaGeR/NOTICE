@@ -1,0 +1,88 @@
+PaGeR — Unified Panoramic Geometry Estimation via Multi-View Foundation Models
+Copyright 2026 The PaGeR Authors
+
+This product is distributed under multiple licenses:
+  - Source code    : Apache License 2.0    (LICENSE)
+  - Model weights  : CC BY-NC 4.0          (LICENSE-MODEL)
+  - Datasets       : per-dataset terms     (see below)
+
+================================================================================
+Third-party source code
+================================================================================
+
+Depth Anything 3 — Apache-2.0
+    https://github.com/ByteDance-Seed/Depth-Anything-3
+    Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
+    Portions under src/depth_anything_3/ are derived from this codebase.
+    Modified files carry a "Modified 2026 by The PaGeR Authors" notice.
+
+Marigold-E2E-FT
+    https://github.com/VisualComputingInstitute/diffusion-e2e-ft
+
+open_clip — MIT
+    https://github.com/mlfoundations/open_clip
+
+================================================================================
+Third-party model weights
+================================================================================
+
+Depth Anything 3 ViT-Giant backbone — CC BY-NC 4.0
+    Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
+    PaGeR checkpoints fine-tuned from this backbone inherit the CC BY-NC 4.0
+    floor.
+
+OpenAI CLIP ViT-B/32 — MIT
+    Copyright (c) 2021 OpenAI
+    Loaded from open_clip at runtime; not redistributed.
+
+================================================================================
+Datasets
+================================================================================
+
+PaGeR does not redistribute any of the prior datasets below; users obtain them
+from the upstream source under each dataset's own terms.
+
+Training mix (sets the non-commercial floor on the released weights):
+    Depth Anything 3 ViT-Giant backbone — CC BY-NC 4.0
+        https://github.com/ByteDance-Seed/Depth-Anything-3
+    PanoInfinigen                       — per-split license (see below)
+        https://huggingface.co/datasets/prs-eth/PanoInfinigen
+        Per-split licenses:
+          - nature   — BSD-3-Clause
+                Rendered from Infinigen (Princeton).
+                https://github.com/princeton-vl/infinigen
+          - indoor   — BSD-3-Clause
+                Rendered from Infinigen (Princeton).
+                https://github.com/princeton-vl/infinigen
+          - urban    — CC BY-NC 4.0
+                Rendered from iCity 3D city scenes (NC-academic; commercial
+                use requires a fresh agreement with the iCity authors).
+                https://parametra.net
+    Structured3D                        — Structured3D Terms of Use (NC)
+        https://structured3d-dataset.org/
+    ScanNet++                           — ScanNet++ Terms of Use (NC)
+        https://kaldir.vc.in.tum.de/scannetpp/
+    ARKitScenes                         — Apple research license (NC)
+        https://github.com/apple/ARKitScenes
+
+Evaluation datasets (read by the released eval scripts):
+    Matterport3D360                     — Matterport3D EULA
+        Original: https://niessner.github.io/Matterport/
+        2K re-renders: https://researchdata.bath.ac.uk/1126/
+    Stanford 2D-3D-Semantics            — Stanford 2D-3D-S terms
+        https://sdss.redivis.com/datasets/f304-a3vhsvcaf
+    Structured3D                        — Structured3D Terms of Use (NC)
+        https://structured3d-dataset.org/
+    Replica360_4K                       — Replica Dataset Research Terms (NC research)
+        Copyright (c) Facebook Technologies, LLC
+        Original:     https://github.com/facebookresearch/replica-dataset
+        4K re-renders: https://opendatalab.com/OpenDataLab/Replica_360_2k_4k_RGBD
+    ZüriPano                            — CC BY 4.0
+        https://huggingface.co/datasets/prs-eth/ZuriPano
+
+Obligations:
+  - ScanNet++ subjects may be flagged for deletion by the dataset providers;
+    affected samples must be removed from any retained copy.
+  - Replica (and the Replica360_4K re-renders) is non-commercial research /
+    educational use only, redistributable only to parties who also accept
+    those terms.
