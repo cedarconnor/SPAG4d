@@ -37,8 +37,14 @@ def main():
 @click.option('--device', default='cuda', help='Device: cuda, cpu, mps')
 @click.option('--quiet', is_flag=True, help='Suppress progress output')
 @click.option('--mock-dap', is_flag=True, help='Use mock DAP model (for testing)')
-@click.option('--generator', type=click.Choice(['da360', 'dap', 'sharp360']),
-              default=None, help='Generator mode: da360, dap, or sharp360 (overrides --depth-model)')
+@click.option('--generator', type=click.Choice(['da360', 'dap', 'sharp360', 'pager']),
+              default=None, help='Generator mode: da360, dap, sharp360, or pager (overrides --depth-model)')
+@click.option('--pager-metric', is_flag=True,
+              help='PaGeR: use the metric scale head (default: scale-invariant depth)')
+@click.option('--pager-use-sky', is_flag=True,
+              help='PaGeR: use the learned sky mask for the depth-range fit')
+@click.option('--pager-use-normals', is_flag=True,
+              help='PaGeR: use surface normals for the grazing-angle clip')
 @click.option('--side-count', type=int, default=6,
               help='Number of faces for SHARP 360 projection (default: 6)')
 @click.option('--seedvr2-upscale', is_flag=True,
@@ -62,6 +68,9 @@ def convert(
     quiet: bool,
     mock_dap: bool,
     generator: str,
+    pager_metric: bool,
+    pager_use_sky: bool,
+    pager_use_normals: bool,
     side_count: int,
     seedvr2_upscale: bool,
 ):
@@ -88,6 +97,8 @@ def convert(
             mode = f"SPAG (stride={stride})"
         depth_label = (generator or depth_model).upper()
         click.echo(f"Loading SPAG-4D [{depth_label} + {mode}]...")
+        if generator == 'pager':
+            click.echo("  NOTE: PaGeR weights are CC BY-NC 4.0 — non-commercial / evaluation use only.")
 
     converter = SPAG4D(
         device=device,
@@ -113,6 +124,9 @@ def convert(
             generator=generator or depth_model,
             side_count=side_count,
             seedvr2_upscale=seedvr2_upscale,
+            pager_metric=pager_metric,
+            pager_use_sky=pager_use_sky,
+            pager_use_normals=pager_use_normals,
         )
 
     if batch:
@@ -146,7 +160,7 @@ def convert(
 
 
 @main.command('download-models')
-@click.option('--model', type=click.Choice(['dap', 'da360', 'sharp', 'seedvr2', 'all']),
+@click.option('--model', type=click.Choice(['dap', 'da360', 'sharp', 'seedvr2', 'pager', 'all']),
               default='all', help='Which model weights to download')
 @click.option('--verify', is_flag=True, help='Verify downloaded weights')
 def download_models(model: str, verify: bool):
@@ -187,6 +201,18 @@ def download_models(model: str, verify: bool):
     if model in ('seedvr2', 'all'):
         click.echo("SeedVR2 requires manual installation.")
         click.echo("Please follow the instructions at: https://github.com/TencentARC/SeedVR")
+
+    if model in ('pager', 'all'):
+        try:
+            from huggingface_hub import snapshot_download
+            from spag4d.pager_model import PAGER_REPO, PAGER_CACHE_DIR
+            click.echo("Downloading PaGeR weights (prs-eth/PaGeR, ~5.7GB, CC BY-NC 4.0 non-commercial)...")
+            path = snapshot_download(PAGER_REPO, cache_dir=str(PAGER_CACHE_DIR))
+            click.echo(f"PaGeR weights cached at: {path}")
+        except Exception as e:
+            click.echo(f"PaGeR download failed: {e}", err=True)
+            if model == 'pager':
+                raise click.Abort()
         click.echo("Install the package and place weights in pretrained/seedvr2/ before using --seedvr2-upscale.")
 
 
