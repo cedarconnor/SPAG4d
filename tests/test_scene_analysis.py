@@ -51,3 +51,31 @@ def test_handles_zero_depth():
 
     assert result["sky_threshold"] > 0
     assert result["depth_min"] > 0
+
+
+def test_sky_mask_excludes_sky_from_depth_range():
+    """A learned sky mask should keep sky pixels out of the percentile fit."""
+    from spag4d.scene_analysis import compute_scene_defaults
+
+    # Ground 2-8m on the bottom half; "sky" reads as 500m on the top half.
+    depth = np.empty((100, 200), dtype=np.float32)
+    depth[:50] = 500.0
+    rng = np.random.default_rng(0)
+    depth[50:] = rng.uniform(2.0, 8.0, size=(50, 200)).astype(np.float32)
+    sky = np.zeros((100, 200), dtype=bool)
+    sky[:50] = True
+
+    masked = compute_scene_defaults(depth, sky_mask=sky)
+    unmasked = compute_scene_defaults(depth)  # sky drags the range up
+
+    assert masked["depth_max"] < 20.0, "sky-excluded depth_max should track the ground"
+    assert unmasked["depth_max"] > masked["depth_max"]
+
+
+def test_sky_mask_none_is_backward_compatible():
+    """sky_mask=None must reproduce the original behavior exactly."""
+    from spag4d.scene_analysis import compute_scene_defaults
+
+    rng = np.random.default_rng(1)
+    depth = rng.uniform(0.5, 5.0, size=(128, 256)).astype(np.float32)
+    assert compute_scene_defaults(depth) == compute_scene_defaults(depth, sky_mask=None)
