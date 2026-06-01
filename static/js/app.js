@@ -31,6 +31,10 @@ class SPAG4DApp {
         this.sideCountInput = document.getElementById('side-count');
         this.seedvr2UpscaleInput = document.getElementById('seedvr2-upscale');
         this.sharp360Settings = document.getElementById('sharp360-settings');
+        this.pagerSettings = document.getElementById('pager-settings');
+        this.pagerMetricInput = document.getElementById('pager-metric');
+        this.pagerUseSkyInput = document.getElementById('pager-use-sky');
+        this.pagerUseNormalsInput = document.getElementById('pager-use-normals');
 
         this.strideInput = document.getElementById('stride');
         this.depthMinInput = document.getElementById('depth-min');
@@ -128,8 +132,9 @@ class SPAG4DApp {
     }
 
     updateGeneratorUI() {
-        const isSharp = this.generatorInput.value === 'sharp360';
-        this.sharp360Settings.style.display = isSharp ? '' : 'none';
+        const gen = this.generatorInput.value;
+        this.sharp360Settings.style.display = gen === 'sharp360' ? '' : 'none';
+        this.pagerSettings.style.display = gen === 'pager' ? '' : 'none';
     }
 
     ensureViewer() {
@@ -236,6 +241,11 @@ class SPAG4DApp {
         if (isSharp) {
             paramObj.side_count = this.sideCountInput.value;
             paramObj.seedvr2_upscale = this.seedvr2UpscaleInput.checked ? 'true' : 'false';
+        } else if (generator === 'pager') {
+            // generator drives routing; do NOT set depth_model (API regex allows only dap|da360)
+            paramObj.pager_metric = this.pagerMetricInput.checked ? 'true' : 'false';
+            paramObj.pager_use_sky = this.pagerUseSkyInput.checked ? 'true' : 'false';
+            paramObj.pager_use_normals = this.pagerUseNormalsInput.checked ? 'true' : 'false';
         } else {
             // Pass depth_model for backward compat — da360/dap map directly
             paramObj.depth_model = generator;

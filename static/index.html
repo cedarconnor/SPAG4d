@@ -177,6 +177,7 @@
                             <option value="da360" selected>DA360</option>
                             <option value="dap">DAP</option>
                             <option value="sharp360">SHARP 360</option>
+                            <option value="pager">PaGeR (NC)</option>
                         </select>
                     </div>
 
@@ -194,6 +195,22 @@
                         <div class="field" style="min-width: 100px;">
                             <label for="seedvr2-upscale">SeedVR2</label>
                             <input type="checkbox" id="seedvr2-upscale">
+                        </div>
+                    </div>
+
+                    <div id="pager-settings" style="display:none;"
+                        title="PaGeR weights are CC BY-NC 4.0 (non-commercial). Strongest outdoor depth + learned sky/normals.">
+                        <div class="field" style="min-width: 70px;">
+                            <label for="pager-metric">Metric</label>
+                            <input type="checkbox" id="pager-metric">
+                        </div>
+                        <div class="field" style="min-width: 70px;">
+                            <label for="pager-use-sky">Sky mask</label>
+                            <input type="checkbox" id="pager-use-sky" checked>
+                        </div>
+                        <div class="field" style="min-width: 80px;">
+                            <label for="pager-use-normals">Normals</label>
+                            <input type="checkbox" id="pager-use-normals" checked>
                         </div>
                     </div>
 
