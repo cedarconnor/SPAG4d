@@ -241,6 +241,9 @@ class SPAG4DApp {
         if (isSharp) {
             paramObj.side_count = this.sideCountInput.value;
             paramObj.seedvr2_upscale = this.seedvr2UpscaleInput.checked ? 'true' : 'false';
+            paramObj.sharp_include_caps = document.getElementById('sharp-caps')?.checked ? 'true' : 'false';
+            paramObj.sharp_cap_fov = document.getElementById('sharp-cap-fov')?.value || '125';
+            paramObj.sharp_seam_latitude = document.getElementById('sharp-seam-lat')?.value || '30';
         } else if (generator === 'pager') {
             // generator drives routing; do NOT set depth_model (API regex allows only dap|da360)
             paramObj.pager_metric = this.pagerMetricInput.checked ? 'true' : 'false';

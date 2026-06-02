@@ -99,6 +99,9 @@ class SPAG4D:
         generator: Optional[str] = None,
         side_count: int = 6,
         seedvr2_upscale: bool = False,
+        sharp_include_caps: bool = True,
+        sharp_cap_fov: float = 125.0,
+        sharp_seam_latitude: float = 30.0,
         pager_metric: bool = False,
         pager_use_sky: bool = False,
         pager_use_normals: bool = False,
@@ -163,6 +166,9 @@ class SPAG4D:
                 side_count=side_count,
                 seedvr2_upscale=seedvr2_upscale,
                 seedvr2_config=seedvr2_cfg,
+                include_caps=sharp_include_caps,
+                cap_fov_degrees=sharp_cap_fov,
+                seam_latitude_degrees=sharp_seam_latitude,
             )
             file_size = Path(output_path).stat().st_size
             return ConversionResult(

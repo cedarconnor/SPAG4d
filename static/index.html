@@ -196,6 +196,25 @@
                             <label for="seedvr2-upscale">SeedVR2</label>
                             <input type="checkbox" id="seedvr2-upscale">
                         </div>
+                        <div class="field" style="min-width: 70px;"
+                            title="Add nadir/zenith cap faces to fill the holes at the poles (directly under/over the camera).">
+                            <label for="sharp-caps">Pole Caps</label>
+                            <input type="checkbox" id="sharp-caps" checked>
+                        </div>
+                        <div class="param-group"
+                            title="Field of view of the nadir/zenith cap faces. Wider = more overlap with horizon faces, less pole distortion gap. Default 125.">
+                            <label for="sharp-cap-fov">Cap FOV <span id="sharp-cap-fov-val">125&deg;</span></label>
+                            <input type="range" id="sharp-cap-fov" min="90" max="170" step="5" value="125"
+                                style="width: 80px;"
+                                oninput="document.getElementById('sharp-cap-fov-val').innerHTML=this.value+'&deg;'">
+                        </div>
+                        <div class="param-group"
+                            title="Latitude where horizon faces hand off to the pole caps. Lower = caps own more of the scene. Default 30.">
+                            <label for="sharp-seam-lat">Seam Lat <span id="sharp-seam-lat-val">30&deg;</span></label>
+                            <input type="range" id="sharp-seam-lat" min="10" max="60" step="5" value="30"
+                                style="width: 80px;"
+                                oninput="document.getElementById('sharp-seam-lat-val').innerHTML=this.value+'&deg;'">
+                        </div>
                     </div>
 
                     <div id="pager-settings" style="display:none;"
