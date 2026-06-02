@@ -31,13 +31,16 @@ See [INSTALL.md](INSTALL.md) for the full walkthrough and troubleshooting.
 
 ## Generators
 
-SPAG-4D offers three ways to convert a panorama into Gaussians:
+SPAG-4D offers four ways to convert a panorama into Gaussians:
 
 | Generator | How It Works | Speed | Quality | VRAM |
 |-----------|-------------|-------|---------|------|
 | **DA360** (default) | DA360 depth estimation + SPAG spherical projection | ~2s | Good | ~2 GB |
 | **DAP** | DAP metric depth + SPAG spherical projection | ~3s | Good | ~3 GB |
 | **SHARP 360** | Per-face SHARP prediction + DA360 alignment + merge | ~30s | Higher detail | ~8 GB |
+| **PaGeR** | PaGeR (DA3 cubemap) depth + learned sky/normals + SPAG projection | ~5s | Strongest outdoor depth | ~12 GB |
+
+> **PaGeR is non-commercial only** (weights are CC BY-NC 4.0, inherited from the DA3 ViT-Giant backbone). DA360/DAP remain the commercial-safe defaults. It also reuses the depth-based path below, adding a learned sky mask (`--pager-use-sky`) and world-frame normals (`--pager-use-normals`). Detail is capped at the model's 504-px cube faces (≈2K effective ERP). Pinned upstream commit `99188f2`.
 
 ### DA360 / DAP (Depth-Based)
 
@@ -104,6 +107,11 @@ python -m spag4d convert panorama.jpg output.ply --generator sharp360
 
 # SHARP 360 with 8 faces and SeedVR2 upscale
 python -m spag4d convert panorama.jpg output.ply --generator sharp360 --side-count 8 --seedvr2-upscale
+
+# PaGeR generator (non-commercial weights; download first: download-models --model pager)
+python -m spag4d convert panorama.jpg output.ply --generator pager
+python -m spag4d convert panorama.jpg output.ply --generator pager --pager-use-sky --pager-use-normals
+python -m spag4d convert panorama.jpg output.ply --generator pager --pager-metric
 
 # DA360 with max quality (one Gaussian per pixel)
 python -m spag4d convert panorama.jpg output.ply --stride 1
@@ -248,7 +256,7 @@ SeedVR2 runs as a native Windows subprocess -- no WSL2 required.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `generator` | `da360` | Generator backend: `da360`, `dap`, or `sharp360` |
+| `generator` | `da360` | Generator backend: `da360`, `dap`, `sharp360`, or `pager` |
 
 ### DA360/DAP Settings (Depth-Based)
 
@@ -269,6 +277,16 @@ SeedVR2 runs as a native Windows subprocess -- no WSL2 required.
 |---------|---------|-------------|
 | `side_count` | `6` | Number of horizon perspective views (4, 6, 8, 10, or 12) |
 | `seedvr2_upscale` | `false` | Upscale face images with SeedVR2 before SHARP prediction |
+
+### PaGeR Settings (non-commercial)
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `pager_metric` | `false` | Use the metric scale head instead of scale-invariant depth |
+| `pager_use_sky` | `false` | Use the learned sky mask to make the auto depth-range fit robust outdoors |
+| `pager_use_normals` | `false` | Use world-frame surface normals for the grazing-angle clip (instead of the depth-gradient proxy) |
+
+Indoor/outdoor is auto-detected (CLIP router) — no setting. Requires `pip install -r requirements-pager.txt` and `download-models --model pager` (~5.7 GB, CC BY-NC 4.0). Reuses the DA360/DAP depth-based pipeline above for everything else.
 
 ### GSFix3D Refinement Settings
 
@@ -304,8 +322,9 @@ SeedVR2 runs as a native Windows subprocess -- no WSL2 required.
 |-------|---------|-------------|
 | **DA360** | Yes | Depth Anything V2 with circular-padding DPT decoder. Seamless 360 depth with no boundary artifacts. |
 | **DAP** | No | Depth Any Panorama. Outputs metric radial depth. |
+| **PaGeR** | No | DA3 cubemap multi-view geometry. Strongest outdoor depth + learned sky/normals. Non-commercial weights (CC BY-NC 4.0). |
 
-Both models download weights automatically on first use (~1.3-1.5 GB each). DA360 is also used internally by SHARP 360 for inter-face depth alignment.
+DA360/DAP download weights automatically on first use (~1.3-1.5 GB each). DA360 is also used internally by SHARP 360 for inter-face depth alignment. PaGeR is opt-in: `pip install -r requirements-pager.txt` then `download-models --model pager` (~5.7 GB).
 
 ---
 
@@ -431,4 +450,4 @@ scripts/
 
 ## License
 
-MIT. Note: SHARP model weights are subject to Apple's model license (noncommercial research only). SHARP source code is Apple MIT-equivalent. OmniRoam is subject to Adobe Research License (noncommercial research only). SeedVR2 is MIT. These integrations are optional modules -- core SPAG-4D remains MIT.
+MIT. Note: SHARP model weights are subject to Apple's model license (noncommercial research only). SHARP source code is Apple MIT-equivalent. OmniRoam is subject to Adobe Research License (noncommercial research only). PaGeR source code is Apache-2.0 but its model weights are CC BY-NC 4.0 (noncommercial / evaluation only, inherited from the Depth Anything 3 ViT-Giant backbone). SeedVR2 is MIT. These integrations are optional modules -- core SPAG-4D remains MIT.

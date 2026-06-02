@@ -8,6 +8,7 @@ import numpy as np
 def compute_scene_defaults(
     depth_map: np.ndarray,
     image_height: int | None = None,
+    sky_mask: np.ndarray | None = None,
 ) -> dict:
     """
     Compute scale-relative pipeline defaults from a depth map.
@@ -29,6 +30,10 @@ def compute_scene_defaults(
 
     # Mask out invalid depths (zero, negative, inf)
     valid = (depth_map > 0.01) & np.isfinite(depth_map)
+    # When a learned sky mask is supplied (PaGeR), exclude sky pixels from the
+    # percentile fit so they don't drag the depth range up outdoors.
+    if sky_mask is not None:
+        valid = valid & ~sky_mask
     if valid.sum() < 100:
         # Fallback for degenerate depth maps
         return {

@@ -31,6 +31,10 @@ class SPAG4DApp {
         this.sideCountInput = document.getElementById('side-count');
         this.seedvr2UpscaleInput = document.getElementById('seedvr2-upscale');
         this.sharp360Settings = document.getElementById('sharp360-settings');
+        this.pagerSettings = document.getElementById('pager-settings');
+        this.pagerMetricInput = document.getElementById('pager-metric');
+        this.pagerUseSkyInput = document.getElementById('pager-use-sky');
+        this.pagerUseNormalsInput = document.getElementById('pager-use-normals');
 
         this.strideInput = document.getElementById('stride');
         this.depthMinInput = document.getElementById('depth-min');
@@ -100,22 +104,6 @@ class SPAG4DApp {
         if (downloadRefinedBtn) {
             downloadRefinedBtn.addEventListener('click', () => this.downloadRefinedFile());
         }
-        // Backend toggle — show/hide param panels
-        const backendSelect = document.getElementById('refine-backend');
-        if (backendSelect) {
-            backendSelect.addEventListener('change', (e) => {
-                const gsParams = document.getElementById('gsfix3d-params');
-                const omniParams = document.getElementById('omniroam-params');
-                if (e.target.value === 'omniroam') {
-                    if (gsParams) gsParams.style.display = 'none';
-                    if (omniParams) omniParams.style.display = '';
-                } else {
-                    if (gsParams) gsParams.style.display = '';
-                    if (omniParams) omniParams.style.display = 'none';
-                }
-            });
-        }
-
         // Diagnostics gallery
         const diagBtn = document.getElementById('show-diagnostics-btn');
         if (diagBtn) {
@@ -144,8 +132,9 @@ class SPAG4DApp {
     }
 
     updateGeneratorUI() {
-        const isSharp = this.generatorInput.value === 'sharp360';
-        this.sharp360Settings.style.display = isSharp ? '' : 'none';
+        const gen = this.generatorInput.value;
+        this.sharp360Settings.style.display = gen === 'sharp360' ? '' : 'none';
+        this.pagerSettings.style.display = gen === 'pager' ? '' : 'none';
     }
 
     ensureViewer() {
@@ -252,6 +241,14 @@ class SPAG4DApp {
         if (isSharp) {
             paramObj.side_count = this.sideCountInput.value;
             paramObj.seedvr2_upscale = this.seedvr2UpscaleInput.checked ? 'true' : 'false';
+            paramObj.sharp_include_caps = document.getElementById('sharp-caps')?.checked ? 'true' : 'false';
+            paramObj.sharp_cap_fov = document.getElementById('sharp-cap-fov')?.value || '125';
+            paramObj.sharp_seam_latitude = document.getElementById('sharp-seam-lat')?.value || '30';
+        } else if (generator === 'pager') {
+            // generator drives routing; do NOT set depth_model (API regex allows only dap|da360)
+            paramObj.pager_metric = this.pagerMetricInput.checked ? 'true' : 'false';
+            paramObj.pager_use_sky = this.pagerUseSkyInput.checked ? 'true' : 'false';
+            paramObj.pager_use_normals = this.pagerUseNormalsInput.checked ? 'true' : 'false';
         } else {
             // Pass depth_model for backward compat — da360/dap map directly
             paramObj.depth_model = generator;
@@ -399,31 +396,18 @@ class SPAG4DApp {
         const refineBtn = document.getElementById('refine-btn');
         if (refineBtn) refineBtn.disabled = true;
 
-        const backend = document.getElementById('refine-backend')?.value || 'gsfix3d';
-        let endpoint, params;
-
-        if (backend === 'omniroam') {
-            params = new URLSearchParams({
-                job_id: this.currentJobId,
-                max_rounds: document.getElementById('max-rounds-v2')?.value || '3',
-                trajectory_mode: document.getElementById('trajectory-mode')?.value || 'auto',
-                tier2_weight: document.getElementById('tier2-weight')?.value || '0.20',
-                upscale_backend: document.getElementById('upscale-backend')?.value || 'none',
-            });
-            endpoint = '/api/refine_v2';
-        } else {
-            params = new URLSearchParams({
-                job_id: this.currentJobId,
-                num_cameras: document.getElementById('num-cameras')?.value || '36',
-                max_rounds: document.getElementById('max-rounds')?.value || '3',
-                finetune_steps: document.getElementById('finetune-steps')?.value || '500',
-            });
-            endpoint = '/api/refine';
-        }
+        const params = new URLSearchParams({
+            job_id: this.currentJobId,
+            max_rounds: document.getElementById('max-rounds-v2')?.value || '3',
+            trajectory_mode: document.getElementById('trajectory-mode')?.value || 'auto',
+            tier2_weight: document.getElementById('tier2-weight')?.value || '0.20',
+            upscale_backend: document.getElementById('upscale-backend')?.value || 'none',
+        });
+        const endpoint = '/api/refine_v2';
 
         const refineStatus = document.getElementById('refine-status');
         if (refineStatus) refineStatus.style.display = '';
-        this.setRefineStatus(`Starting ${backend === 'omniroam' ? 'OmniRoam' : 'GSFix3D'} refinement...`, 0);
+        this.setRefineStatus('Starting OmniRoam refinement...', 0);
         const diagBtn = document.getElementById('show-diagnostics-btn');
         if (diagBtn) diagBtn.disabled = false;
 
@@ -451,13 +435,6 @@ class SPAG4DApp {
         if (!this.currentRefineId) return;
 
         const stageLabels = {
-            // GSFix3D stages
-            'camera_rig': 'Generating cameras',
-            'mesh_extract': 'Extracting mesh',
-            'finetune': 'Adapting to scene',
-            'render_holes': 'Detecting holes',
-            'gsfixer_inference': 'Repairing holes',
-            'distill': 'Optimizing 3D',
             // OmniRoam v2 stages
             'load': 'Loading splat',
             'gap_analysis': 'Analyzing gaps',

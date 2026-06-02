@@ -89,6 +89,18 @@ Enable the **SHARP Refine** checkbox (or `--sharp-refine` on CLI) for per-face n
 
 Select the depth model from the **Depth Model** dropdown in the web UI, or use `--depth-model da360` on the command line.
 
+### Optional: PaGeR backend (non-commercial)
+
+PaGeR is the strongest outdoor depth backend, and adds a learned sky mask and world-frame normals. Its weights are **CC BY-NC 4.0 (non-commercial / evaluation only)**, so it ships as an optional module — DA360/DAP remain the commercial-safe defaults.
+
+```bash
+pip install -r requirements-pager.txt          # open_clip_torch, pytorch360convert, addict, trimesh
+python -m spag4d download-models --model pager  # prs-eth/PaGeR, ~5.7 GB
+python -m spag4d convert pano.jpg out.ply --generator pager --pager-use-sky --pager-use-normals
+```
+
+Native Windows is supported (pure-PyTorch; the import chain is verified). If `open_clip` / `pytorch360convert` / DINOv2 ever fail to run on your machine, run PaGeR under WSL2 (it is officially tested on Linux/CUDA≥12.1). Needs ~12 GB VRAM.
+
 ---
 
 ## What Gets Downloaded

@@ -18,3 +18,6 @@ gsplat>=1.5.0
 
 # Visualization
 matplotlib>=3.7.0
+
+# Point cloud processing (voxel downsampling)
+open3d>=0.18.0

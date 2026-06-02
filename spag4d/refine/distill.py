@@ -37,17 +37,22 @@ def distill_to_gaussians(
     prune_opacity_threshold=0.005,
     iters_per_view=20,
     kf_iters=50,
+    protect_original_count=0,
+    tier2_weight=0.20,
 ):
     """Optimize 3DGS to match repaired images via differentiable rendering.
 
-    Follows GSFix3D's refine_gs.py pattern closely:
-    - Phase A: 20 iters per repaired view (with densification)
-    - Phase B: 50 passes over extended training set (repaired + original)
+    Two modes controlled by ``protect_original_count``:
 
-    Key protections for original content:
-    - Original Gaussians get 0.1x learning rate to prevent drift
-    - Phase B is conservative (50 iters, not thousands)
-    - Original cubemap views anchor the already-good regions
+    **GSFix3D mode** (protect_original_count=0, default):
+        GSFixer produces full-frame inpainted images so the loss covers the
+        entire image.  Original Gaussians get 0.1x gradient scaling.
+        Densification is enabled during Phase A.
+
+    **OmniRoam / hole-fill mode** (protect_original_count > 0):
+        Only fills holes — original Gaussians are completely frozen in Phase A
+        and the loss is masked to hole regions.  Phase B uses only tier-1
+        (source cubemap) views to anchor consistency.  No densification.
     """
     if gaussians is None:
         logger.warning("distill_to_gaussians: gaussians is None, skipping")
@@ -60,14 +65,13 @@ def distill_to_gaussians(
 
     from .camera_rig import _camera_to_RT
 
-    # Record initial Gaussian count for provenance-based LR scaling
-    initial_count = gaussians.get_xyz.shape[0]
+    hole_fill_mode = protect_original_count > 0
+    total_count_before = gaussians.get_xyz.shape[0]
 
     # Create a mock parser for OptimizationParams
     import argparse
     mock_parser = argparse.ArgumentParser()
     optim_params = OptimizationParams(mock_parser)
-    # Override with our settings
     optim_params.position_lr_init = lr_position
     optim_params.position_lr_final = lr_position * 0.01
     optim_params.position_lr_max_steps = iters_per_view * len(repaired_images) + kf_iters
@@ -78,11 +82,11 @@ def distill_to_gaussians(
     optim_params.densify_grad_threshold = densify_grad_threshold
     optim_params.prune_opacity_threshold = prune_opacity_threshold
 
-    # Setup optimizer
     gaussians.training_setup(optim_params)
 
-    # Scale down LR for original Gaussians to prevent drift
-    _apply_original_lr_scaling(gaussians, initial_count, scale=0.1)
+    if not hole_fill_mode:
+        # GSFix3D: gentle 0.1x scaling for originals
+        _apply_original_lr_scaling(gaussians, total_count_before, scale=0.1)
 
     # Pipe mock for renderer
     class PipeMock:
@@ -107,6 +111,14 @@ def distill_to_gaussians(
     ]
     repair_gs_cams = [_camera_to_gs(cam) for cam in cameras]
 
+    # Convert hole masks to tensors
+    hole_mask_tensors = []
+    for i, mask in enumerate(hole_masks):
+        if mask is not None:
+            hole_mask_tensors.append(torch.from_numpy(mask).cuda())
+        else:
+            hole_mask_tensors.append(None)
+
     orig_tensors = None
     orig_gs_cams = None
     if original_images:
@@ -118,31 +130,41 @@ def distill_to_gaussians(
     n_repair = len(repair_tensors)
     n_orig = len(orig_tensors) if orig_tensors else 0
 
-    logger.info(f"Distillation: {iters_per_view} iters/view x {n_repair} views + "
-                f"{kf_iters} mixed iters ({n_orig} original views)")
+    mode_label = "hole-fill" if hole_fill_mode else "GSFix3D"
+    logger.info(f"Distillation ({mode_label}): {iters_per_view} iters/view x "
+                f"{n_repair} repaired + {kf_iters} anchor iters ({n_orig} original views)")
 
-    # --- Phase A: Per-view optimization on repaired images ---
-    # (Matching refine_gs.py: 20 iters per fixed image with densification)
+    # ── Phase A: Per-view optimization on repaired images ──
     for view_idx in range(n_repair):
         gt_image = repair_tensors[view_idx]
         gs_cam = repair_gs_cams[view_idx]
+        mask_t = hole_mask_tensors[view_idx] if view_idx < len(hole_mask_tensors) else None
 
         for step in range(iters_per_view):
             render_pkg = gs_render(gs_cam, gaussians, PipeMock(), bg)
             rendered = render_pkg["render"]
-            viewspace_points = render_pkg["viewspace_points"]
-            visibility_filter = render_pkg["visibility_filter"]
 
-            loss = 0.8 * l1_loss(rendered, gt_image) + 0.2 * (1 - ssim(rendered, gt_image))
+            if hole_fill_mode and mask_t is not None:
+                # Loss ONLY in hole regions, scaled by configured tier-2 weight
+                loss = compute_weighted_loss(rendered, gt_image,
+                                            tier2_weight=tier2_weight, hole_mask=mask_t)
+            else:
+                loss = 0.8 * l1_loss(rendered, gt_image) + 0.2 * (1 - ssim(rendered, gt_image))
+
             loss.backward()
 
-            gaussians.add_densification_stats(viewspace_points, visibility_filter)
-
-            if step % 5 == 0:
-                gaussians.densify(densify_grad_threshold)
-
-            if step == iters_per_view - 1:
-                gaussians.prune(prune_opacity_threshold)
+            if hole_fill_mode:
+                # Completely freeze original Gaussians — zero their gradients
+                _zero_original_grads(gaussians, protect_original_count)
+            else:
+                # GSFix3D mode: densify (not used in hole-fill mode)
+                viewspace_points = render_pkg["viewspace_points"]
+                visibility_filter = render_pkg["visibility_filter"]
+                gaussians.add_densification_stats(viewspace_points, visibility_filter)
+                if step % 5 == 0:
+                    gaussians.densify(densify_grad_threshold)
+                if step == iters_per_view - 1:
+                    gaussians.prune(prune_opacity_threshold)
 
             gaussians.optimizer.step()
             gaussians.optimizer.zero_grad(set_to_none=True)
@@ -151,32 +173,40 @@ def distill_to_gaussians(
             logger.info(f"  Phase A: view {view_idx+1}/{n_repair}, "
                         f"loss={loss.item():.4f}")
 
-    # --- Phase B: Conservative mixed optimization (matching refine_gs.py kf_iters=50) ---
-    all_tensors = list(repair_tensors) + (list(orig_tensors) if orig_tensors else [])
-    all_cams = list(repair_gs_cams) + (list(orig_gs_cams) if orig_gs_cams else [])
+    # ── Phase B: Anchor optimization ──
+    if hole_fill_mode:
+        # Hole-fill mode: ONLY tier-1 (source cubemap) views — no tier-2
+        # This anchors consistency without dragging originals toward OmniRoam
+        anchor_tensors = orig_tensors or []
+        anchor_cams = orig_gs_cams or []
+    else:
+        # GSFix3D mode: mixed (repaired + original) views
+        anchor_tensors = list(repair_tensors) + (list(orig_tensors) if orig_tensors else [])
+        anchor_cams = list(repair_gs_cams) + (list(orig_gs_cams) if orig_gs_cams else [])
 
-    for step in range(kf_iters):
-        # Shuffle and iterate over all views each step
-        indices = list(range(len(all_tensors)))
-        random.shuffle(indices)
+    if anchor_tensors:
+        for step in range(kf_iters):
+            indices = list(range(len(anchor_tensors)))
+            random.shuffle(indices)
 
-        for idx in indices:
-            gt_image = all_tensors[idx]
-            gs_cam = all_cams[idx]
+            for idx in indices:
+                gt_image = anchor_tensors[idx]
+                gs_cam = anchor_cams[idx]
 
-            rendered = gs_render(gs_cam, gaussians, PipeMock(), bg)["render"]
-            loss = 0.8 * l1_loss(rendered, gt_image) + 0.2 * (1 - ssim(rendered, gt_image))
-            loss.backward()
+                rendered = gs_render(gs_cam, gaussians, PipeMock(), bg)["render"]
+                loss = 0.8 * l1_loss(rendered, gt_image) + 0.2 * (1 - ssim(rendered, gt_image))
+                loss.backward()
 
-            gaussians.optimizer.step()
-            gaussians.optimizer.zero_grad(set_to_none=True)
+                gaussians.optimizer.step()
+                gaussians.optimizer.zero_grad(set_to_none=True)
 
-        if step % 10 == 0:
-            logger.info(f"  Phase B: pass {step}/{kf_iters}, loss={loss.item():.4f}")
+            if step % 10 == 0:
+                logger.info(f"  Phase B: pass {step}/{kf_iters}, loss={loss.item():.4f}")
 
     final_count = gaussians.get_xyz.shape[0]
-    logger.info(f"Distillation complete. Gaussians: {initial_count} -> {final_count} "
-                f"(+{final_count - initial_count} new)")
+    delta = final_count - total_count_before
+    logger.info(f"Distillation complete. Gaussians: {total_count_before} -> {final_count} "
+                f"({'+'if delta >= 0 else ''}{delta})")
     return gaussians
 
 
@@ -216,18 +246,27 @@ def compute_weighted_loss(
     return loss * tier2_weight
 
 
-def _apply_original_lr_scaling(gaussians, initial_count, scale=0.1):
-    """Reduce LR for original Gaussians by creating per-param LR masks.
+def _zero_original_grads(gaussians, original_count):
+    """Zero out gradients for original Gaussians (indices < original_count).
 
-    Since Adam doesn't natively support per-element LR, we scale the
-    gradients of original Gaussians instead (equivalent effect).
-    This is applied as a hook on the optimizer.
+    Called after backward() in hole-fill mode to completely freeze the
+    original Gaussians while allowing gap-seed and new Gaussians to learn.
+    """
+    for param_group in gaussians.optimizer.param_groups:
+        for param in param_group['params']:
+            if param.grad is not None and len(param.shape) >= 1 and param.shape[0] >= original_count:
+                param.grad[:original_count] = 0.0
+
+
+def _apply_original_lr_scaling(gaussians, initial_count, scale=0.1):
+    """Reduce LR for original Gaussians by scaling their gradients.
+
+    Used in GSFix3D mode where originals should update gently (not frozen).
     """
     if not hasattr(gaussians, 'optimizer') or gaussians.optimizer is None:
         return
 
     def _scale_grad_hook(grad, count=initial_count, s=scale):
-        """Scale gradients for original Gaussians (indices < count)."""
         if grad is None:
             return grad
         scaled = grad.clone()
@@ -235,7 +274,6 @@ def _apply_original_lr_scaling(gaussians, initial_count, scale=0.1):
             scaled[:count] *= s
         return scaled
 
-    # Register hooks on all optimized parameters
     for param_group in gaussians.optimizer.param_groups:
         for param in param_group['params']:
             if param.requires_grad and param.shape[0] >= initial_count:

@@ -107,11 +107,11 @@ class TestMakeHorizonView:
             view = make_horizon_view(i, 8)
             assert abs(view.forward[1]) < 1e-10, f"View {i}: forward.y = {view.forward[1]}"
 
-    def test_down_vector_matches_sharp_convention(self):
-        """All horizon views have down = (0, +1, 0) matching SHARP/Apple convention."""
+    def test_down_vector_is_negative_y(self):
+        """All horizon views have down = (0, -1, 0) for Y-up viewer convention."""
         for i in range(6):
             view = make_horizon_view(i, 6)
-            np.testing.assert_allclose(view.down, [0.0, 1.0, 0.0], atol=1e-10)
+            np.testing.assert_allclose(view.down, [0.0, -1.0, 0.0], atol=1e-10)
 
 
 # ---------------------------------------------------------------------------

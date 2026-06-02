@@ -1,0 +1,20 @@
+PaGeR — Pretrained Model Weights License
+========================================
+
+The pretrained PaGeR checkpoints (distributed with this repository and on
+the Hugging Face Hub under https://huggingface.co/prs-eth) are licensed
+under the Creative Commons Attribution-NonCommercial 4.0 International
+License (CC BY-NC 4.0):
+
+    https://creativecommons.org/licenses/by-nc/4.0/legalcode
+
+This applies to the network weights only. The source code in this
+repository is licensed separately under the Apache License 2.0 (LICENSE).
+
+The non-commercial restriction is inherited from the Depth Anything 3
+ViT-Giant backbone (CC BY-NC 4.0, ByteDance Ltd.) which the PaGeR
+checkpoints are fine-tuned from, and is the floor implied by the
+non-commercial / research-only terms of the training datasets. See NOTICE
+for the full third-party attribution list.
+
+For commercial licensing inquiries, please contact the PaGeR Authors.

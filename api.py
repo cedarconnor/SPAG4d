@@ -213,9 +213,15 @@ async def convert_panorama(
     grazing_angle: float = Query(90.0, ge=30.0, le=90.0),
     sparse_pruning: float = Query(0.0, ge=0.0, le=1.0),
     global_scale: float = Query(1.0, ge=0.1, le=10.0),
-    generator: Optional[str] = Query(None, pattern="^(da360|dap|sharp360)$"),
+    generator: Optional[str] = Query(None, pattern="^(da360|dap|sharp360|pager)$"),
     side_count: int = Query(6, ge=2, le=12),
     seedvr2_upscale: bool = Query(False),
+    sharp_include_caps: bool = Query(True),
+    sharp_cap_fov: float = Query(125.0, ge=90.0, le=170.0),
+    sharp_seam_latitude: float = Query(30.0, ge=10.0, le=60.0),
+    pager_metric: bool = Query(False),
+    pager_use_sky: bool = Query(False),
+    pager_use_normals: bool = Query(False),
 ):
     """Convert uploaded panorama to Gaussian splat PLY."""
     if depth_min is not None and depth_max is not None and depth_min >= depth_max:
@@ -251,6 +257,12 @@ async def convert_panorama(
         "generator": generator,
         "side_count": side_count,
         "seedvr2_upscale": seedvr2_upscale,
+        "sharp_include_caps": sharp_include_caps,
+        "sharp_cap_fov": sharp_cap_fov,
+        "sharp_seam_latitude": sharp_seam_latitude,
+        "pager_metric": pager_metric,
+        "pager_use_sky": pager_use_sky,
+        "pager_use_normals": pager_use_normals,
     }
 
     suffix = Path(file.filename).suffix if file.filename else '.jpg'
@@ -276,6 +288,12 @@ async def convert_panorama(
         generator=generator,
         side_count=side_count,
         seedvr2_upscale=seedvr2_upscale,
+        sharp_include_caps=sharp_include_caps,
+        sharp_cap_fov=sharp_cap_fov,
+        sharp_seam_latitude=sharp_seam_latitude,
+        pager_metric=pager_metric,
+        pager_use_sky=pager_use_sky,
+        pager_use_normals=pager_use_normals,
     ))
 
     return JSONResponse({
@@ -299,6 +317,12 @@ async def process_job(
     generator: Optional[str] = None,
     side_count: int = 6,
     seedvr2_upscale: bool = False,
+    sharp_include_caps: bool = True,
+    sharp_cap_fov: float = 125.0,
+    sharp_seam_latitude: float = 30.0,
+    pager_metric: bool = False,
+    pager_use_sky: bool = False,
+    pager_use_normals: bool = False,
 ):
     """Process conversion job with GPU semaphore."""
     try:
@@ -325,6 +349,12 @@ async def process_job(
                 generator=generator,
                 side_count=side_count,
                 seedvr2_upscale=seedvr2_upscale,
+                sharp_include_caps=sharp_include_caps,
+                sharp_cap_fov=sharp_cap_fov,
+                sharp_seam_latitude=sharp_seam_latitude,
+                pager_metric=pager_metric,
+                pager_use_sky=pager_use_sky,
+                pager_use_normals=pager_use_normals,
             )
 
             job.result = result
@@ -426,109 +456,6 @@ async def download_file(job_id: str):
 # ─────────────────────────────────────────────────────────────────
 # Refinement Endpoints
 # ─────────────────────────────────────────────────────────────────
-@app.post("/api/refine")
-async def start_refinement(
-    job_id: str = Query(..., description="Source conversion job ID"),
-    max_rounds: int = Query(3, ge=1, le=5),
-    num_cameras: int = Query(36, ge=6, le=72),
-    finetune_steps: int = Query(500, ge=100, le=2000),
-):
-    """Start GSFix3D refinement on an existing conversion job."""
-    if job_id not in jobs:
-        raise HTTPException(404, "Source job not found")
-
-    job = jobs[job_id]
-    if job.status != "complete":
-        raise HTTPException(400, "Source job not complete")
-
-    if not (job.output_ply_path and job.output_ply_path.exists()):
-        raise HTTPException(400, "PLY file not found")
-    if not (job.input_path and job.input_path.exists()):
-        raise HTTPException(400, "Input panorama not found (may have been cleaned up)")
-    if not (job.depth_npy_path and job.depth_npy_path.exists()):
-        raise HTTPException(400, "Depth map not found")
-
-    refine_id = str(uuid.uuid4())
-    refine_job = RefineJobInfo(refine_id, job_id)
-    refine_job.params = {
-        "max_rounds": max_rounds,
-        "num_cameras": num_cameras,
-        "finetune_steps": finetune_steps,
-    }
-    refine_job.output_ply_path = TEMP_DIR / f"{refine_id}_refined.ply"
-    refine_job.diagnostics_dir = TEMP_DIR / f"{refine_id}_diagnostics"
-    refine_jobs[refine_id] = refine_job
-
-    asyncio.create_task(process_refinement(refine_job, job))
-
-    return JSONResponse({
-        "refine_job_id": refine_id,
-        "status": "queued",
-    })
-
-
-async def process_refinement(refine_job: RefineJobInfo, source_job: JobInfo):
-    """Run refinement pipeline in background."""
-    try:
-        async with gpu_semaphore:
-            refine_job.status = "processing"
-            refine_job.last_updated = time.time()
-
-            result = await run_in_threadpool(
-                _run_refinement,
-                source_job=source_job,
-                refine_job=refine_job,
-            )
-
-            refine_job.metrics = result
-            refine_job.status = "complete"
-            refine_job.last_updated = time.time()
-
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        refine_job.status = "error"
-        refine_job.error = str(e)
-        refine_job.last_updated = time.time()
-
-
-def _run_refinement(source_job: JobInfo, refine_job: RefineJobInfo) -> dict:
-    """Execute the GSFix3D refinement pipeline (blocking, runs in thread)."""
-    import numpy as np
-    from spag4d.refine import refine_splat
-
-    params = refine_job.params
-    output_dir = refine_job.diagnostics_dir or TEMP_DIR / f"{refine_job.refine_id}_out"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    depth_map = np.load(str(source_job.depth_npy_path))
-
-    def update_progress(round_num, stage, pct):
-        refine_job.round_number = round_num
-        refine_job.stage = stage
-        refine_job.progress_pct = pct
-        refine_job.last_updated = time.time()
-
-    result = refine_splat(
-        ply_path=str(source_job.output_ply_path),
-        panorama_path=str(source_job.input_path),
-        depth_map=depth_map,
-        max_iterations=params.get("max_rounds", 3),
-        num_cameras=params.get("num_cameras", 36),
-        finetune_steps=params.get("finetune_steps", 500),
-        output_path=str(refine_job.output_ply_path),
-        progress_callback=update_progress,
-        diagnostics_dir=str(output_dir / "diagnostics"),
-    )
-
-    return {
-        "initial_hole_fraction": result["initial_hole_fraction"],
-        "final_hole_fraction": result["final_hole_fraction"],
-        "final_count": result["gaussians_count"],
-        "iterations_used": result["iterations_used"],
-        "total_time": result["total_time"],
-    }
-
 
 @app.post("/api/refine_v2")
 async def start_refinement_v2(

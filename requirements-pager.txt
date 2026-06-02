@@ -1,0 +1,11 @@
+# Optional PaGeR depth backend (--generator pager).
+# Weights are CC BY-NC 4.0 — non-commercial / evaluation use only.
+# Install into the existing .venv:  pip install -r requirements-pager.txt
+# numpy<2 is already satisfied by the core install (1.26.x); do NOT re-pin it here.
+#
+# Most of PaGeR's stack (torch, einops, safetensors, omegaconf, opencv, huggingface_hub,
+# scipy, tqdm) is already present from the core/refine installs. These are the gaps:
+open_clip_torch
+pytorch360convert
+addict
+trimesh

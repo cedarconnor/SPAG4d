@@ -1,0 +1,9 @@
+# Model knobs are loaded from the checkpoint's bundled `config.yaml`; this file
+# only carries inference-time settings (data root, output frequency, ...).
+
+data:
+  data_path: /path/to/datasets
+  dataset: ZuriPano         # ZuriPano | Matterport3D360 | Stanford2D3DS | Structured3D | Replica360_4K
+
+logging:
+  img_report_frequency: 1   # Save a JPEG preview every Nth sample (0/1 = every sample).
