@@ -129,6 +129,28 @@ def make_horizon_view(index: int, side_count: int) -> FaceOrientation:
     return FaceOrientation(name=name, right=right, down=down, forward=forward)
 
 
+def make_pole_view(pole: str) -> FaceOrientation:
+    """Create a cap FaceOrientation looking straight down (nadir) or up (zenith).
+
+    The basis is chosen to match the horizon views' handedness (det(R) = -1) so
+    extraction and placement compose with the same machinery. ``right`` is world
+    +X; ``down`` (image-down) is world -Z for the nadir and world +Z for the
+    zenith, giving a consistent in-plane orientation across the seam with the
+    front (azimuth-0) horizon face.
+    """
+    if pole == "nadir":
+        forward = np.array([0.0, -1.0, 0.0], dtype=np.float64)  # straight down
+        right = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        down = np.array([0.0, 0.0, -1.0], dtype=np.float64)
+    elif pole == "zenith":
+        forward = np.array([0.0, 1.0, 0.0], dtype=np.float64)   # straight up
+        right = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        down = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    else:
+        raise ValueError(f"pole must be 'nadir' or 'zenith', got {pole!r}")
+    return FaceOrientation(name=pole, right=right, down=down, forward=forward)
+
+
 def build_extraction_layout(
     face_size: int,
     panorama_height: int,
@@ -175,6 +197,41 @@ def build_extraction_layout(
         views=views,
         focal_px=focal_px,
         focal_y_px=focal_y_px,
+        image_width=image_width,
+        image_height=image_height,
+    )
+
+
+def build_cap_layout(
+    face_size: int,
+    cap_fov_degrees: float = 125.0,
+    poles: Tuple[str, ...] = ("nadir", "zenith"),
+) -> ExtractionLayout:
+    """Build a layout of square pole-cap views (nadir/zenith).
+
+    Cap faces use a wide square FOV so they reach past the horizon faces' vertical
+    edge, letting the two tile without a gap. A ``cap_fov_degrees`` of 125 covers
+    from each pole down to latitude ~27.5 deg, overlapping horizon faces that
+    reach ~31 deg; ownership is resolved by the seam-latitude clip in the pipeline.
+
+    Args:
+        face_size: Square cap face size in pixels.
+        cap_fov_degrees: Field of view for the cap faces (clamped to 170).
+        poles: Which caps to build.
+
+    Returns:
+        An ExtractionLayout with square intrinsics and the requested cap views.
+    """
+    fov = min(170.0, float(cap_fov_degrees))
+    image_width = int(face_size)
+    image_height = int(face_size)
+    focal_px = (image_width / 2.0) / math.tan(math.radians(fov) / 2.0)
+    views = [make_pole_view(p) for p in poles]
+    return ExtractionLayout(
+        name=f"caps_{int(fov)}deg_{face_size}px",
+        views=views,
+        focal_px=focal_px,
+        focal_y_px=focal_px,
         image_width=image_width,
         image_height=image_height,
     )
@@ -340,7 +397,11 @@ def _world_to_erp_pixels(
     latitude = np.arcsin(np.clip(world_y / norm, -1.0, 1.0))  # (-pi/2, pi/2)
 
     sample_x = (longitude / TWO_PI + 0.5) * erp_width - 0.5
-    sample_y = (latitude / PI + 0.5) * erp_height - 0.5
+    # Standard ERP convention (matching spherical_grid.py): top row = +90 deg
+    # latitude (zenith, +Y up). The previous (latitude/PI + 0.5) mapping put +Y
+    # at the BOTTOM row, vertically flipping every extracted face and delivering
+    # an upside-down splat relative to the depth-based paths and the viewer.
+    sample_y = (0.5 - latitude / PI) * erp_height - 0.5
 
     return sample_x, sample_y
 
@@ -468,6 +529,41 @@ def filter_gaussians_by_view_border(
             v_limit = math.tan(math.radians(vertical_degrees / 2.0))
         v_ratio = torch.abs(means[:, 1]) / depth.clamp(min=1e-6)
         mask = mask & (v_ratio <= v_limit)
+
+    return _G3D(
+        mean_vectors=gaussians.mean_vectors[:, mask],
+        singular_values=gaussians.singular_values[:, mask],
+        quaternions=gaussians.quaternions[:, mask],
+        colors=gaussians.colors[:, mask],
+        opacities=gaussians.opacities[:, mask],
+    )
+
+
+def filter_gaussians_by_cone(
+    gaussians: "Gaussians3D",
+    half_angle_degrees: float,
+) -> "Gaussians3D":
+    """Hard Voronoi clipping for a pole-cap face: keep Gaussians whose view-local
+    direction is within ``half_angle_degrees`` of the forward (+Z / pole) axis.
+
+    A cap face's forward axis points at the pole, so keeping a cone of half-angle
+    ``(90 - seam_latitude)`` retains exactly the polar cap (|latitude| > seam) and
+    hands the rest to the horizon faces, which are vertical-clipped at the seam.
+
+    Args:
+        gaussians: Gaussians3D (1, N, D) in view-local coordinates (+Z forward).
+        half_angle_degrees: Cone half-angle around +Z to keep.
+
+    Returns:
+        Filtered Gaussians3D.
+    """
+    from sharp.utils.gaussians import Gaussians3D as _G3D
+
+    means = gaussians.mean_vectors[0]  # (N, 3)
+    radius = torch.norm(means, dim=-1).clamp(min=1e-6)
+    cos_angle = means[:, 2] / radius  # forward = +Z
+    limit = math.cos(math.radians(half_angle_degrees))
+    mask = (means[:, 2] > 0.0) & (cos_angle >= limit)
 
     return _G3D(
         mean_vectors=gaussians.mean_vectors[:, mask],
@@ -751,6 +847,59 @@ def _load_sharp_predictor(device: torch.device):
 
 
 # ---------------------------------------------------------------------------
+# Per-face processing
+# ---------------------------------------------------------------------------
+
+def _process_face(
+    view: FaceOrientation,
+    face_img: np.ndarray,
+    eff_focal_x: float,
+    eff_focal_y: float,
+    eff_width: int,
+    eff_height: int,
+    da360_disparity: np.ndarray,
+    predictor,
+    device: torch.device,
+    clip_fn: Callable[["Gaussians3D"], "Gaussians3D"],
+) -> Tuple[Optional["Gaussians3D"], Optional[float]]:
+    """SHARP-predict one face, clip it, DA360-align it, and rotate to world frame.
+
+    Returns ``(world_gaussians, pre_alignment_median_radius)`` or ``(None, None)``
+    if the face is empty after clipping. Used for both horizon and cap views; the
+    only difference is ``clip_fn`` (horizontal+vertical border vs. polar cone).
+    """
+    from sharp.cli.predict import predict_image
+    from sharp.utils.gaussians import apply_transform
+
+    gaussians = predict_image(predictor, face_img, (eff_focal_x, eff_focal_y), device)
+    gaussians = clip_fn(gaussians)
+    if gaussians.mean_vectors.shape[1] == 0:
+        return None, None
+
+    pre_radius = float(torch.median(
+        torch.norm(gaussians.mean_vectors, dim=-1),
+    ).item())
+
+    ref_disp_view = extract_perspective_scalar_view(
+        da360_disparity, eff_width, eff_height, eff_focal_x, eff_focal_y, view,
+    )
+    aligned = align_gaussians_to_reference(
+        gaussians, ref_disp_view, eff_focal_x, eff_focal_y,
+        eff_width, eff_height, grid_resolution=8,
+    )
+    # align_gaussians_to_reference returns (gaussians, median_scale, count) but
+    # short-circuits to a bare Gaussians3D when there are no points.
+    gaussians = aligned[0] if isinstance(aligned, tuple) else aligned
+
+    R = view.rotation_matrix
+    transform = torch.zeros(3, 4, device=device, dtype=torch.float32)
+    transform[:3, :3] = torch.from_numpy(R).float().to(device)
+    gaussians = apply_transform(gaussians, transform)
+
+    return gaussians, pre_radius
+
+
+# ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
 
@@ -763,6 +912,9 @@ def convert_sharp360(
     seedvr2_upscale: bool = False,
     seedvr2_config: Optional["SeedVR2Config"] = None,
     progress_callback: Optional[Callable[[str, int, int], None]] = None,
+    include_caps: bool = True,
+    cap_fov_degrees: float = 125.0,
+    seam_latitude_degrees: float = 30.0,
 ) -> dict:
     """Full SHARP 360 pipeline: ERP panorama -> merged 3DGS PLY.
 
@@ -825,15 +977,30 @@ def convert_sharp360(
     _progress("extract", 0, side_count)
     faces = extract_perspective_views(layout, panorama)
     _progress("extract", side_count, side_count)
-    LOGGER.info("Extracted %d perspective faces", len(faces))
+    LOGGER.info("Extracted %d horizon faces", len(faces))
+
+    # Pole caps (nadir/zenith) close the holes the horizon ring leaves at the
+    # poles. Square wide-FOV faces that overlap the horizon faces' vertical edge.
+    cap_layout = None
+    cap_faces: Dict[str, np.ndarray] = {}
+    if include_caps:
+        cap_layout = build_cap_layout(face_size=face_size, cap_fov_degrees=cap_fov_degrees)
+        cap_faces = extract_perspective_views(cap_layout, panorama)
+        LOGGER.info(
+            "Extracted %d cap faces (%dx%d, FOV=%.0f deg)",
+            len(cap_faces), cap_layout.image_width, cap_layout.image_height, cap_fov_degrees,
+        )
 
     # ------------------------------------------------------------------
-    # 4. Optional SeedVR2 upscale
+    # 4. Optional SeedVR2 upscale (horizon + caps)
     # ------------------------------------------------------------------
     effective_width = layout.image_width
     effective_height = layout.image_height
     effective_focal_x = layout.focal_px
     effective_focal_y = layout.focal_y_px
+    cap_eff_width = cap_layout.image_width if cap_layout else 0
+    cap_eff_height = cap_layout.image_height if cap_layout else 0
+    cap_eff_focal = cap_layout.focal_px if cap_layout else 0.0
 
     if seedvr2_upscale:
         from .seedvr2 import SeedVR2Config, upscale_images
@@ -841,7 +1008,7 @@ def convert_sharp360(
         if seedvr2_config is None:
             seedvr2_config = SeedVR2Config()
         with tempfile.TemporaryDirectory(prefix="sharp360_seedvr2_") as tmp_dir:
-            LOGGER.info("Upscaling %d faces with SeedVR2...", len(faces))
+            LOGGER.info("Upscaling %d horizon faces with SeedVR2...", len(faces))
             _progress("seedvr2", 0, side_count)
             faces, new_w, new_h = upscale_images(faces, seedvr2_config, tmp_dir)
             _progress("seedvr2", side_count, side_count)
@@ -858,6 +1025,13 @@ def convert_sharp360(
                 effective_width, effective_height, effective_focal_x, effective_focal_y,
             )
 
+            if cap_faces:
+                with tempfile.TemporaryDirectory(prefix="sharp360_seedvr2_cap_") as cap_tmp:
+                    cap_faces, cnew_w, cnew_h = upscale_images(cap_faces, seedvr2_config, cap_tmp)
+                cap_eff_focal *= cnew_w / max(1, cap_eff_width)
+                cap_eff_width = cnew_w
+                cap_eff_height = cnew_h
+
     # ------------------------------------------------------------------
     # 5. DA360 disparity on full panorama
     # ------------------------------------------------------------------
@@ -870,94 +1044,65 @@ def convert_sharp360(
     )
 
     # ------------------------------------------------------------------
-    # 6. SHARP prediction per face
+    # 6-9. SHARP prediction, clipping, alignment, world rotation per face
     # ------------------------------------------------------------------
     predictor = _load_sharp_predictor(device)
     f_px_tuple = (effective_focal_x, effective_focal_y)
 
     clip_degrees = 360.0 / side_count  # Total horizontal clip width per face
+    # When caps are present, vertical-clip the horizon faces at the seam latitude
+    # so horizon (|lat| < seam) and caps (|lat| > seam) tile without overlap.
+    horizon_vertical_clip = 2.0 * seam_latitude_degrees if include_caps else None
+    cap_half_angle = 90.0 - seam_latitude_degrees  # cone half-angle around the pole
 
     all_gaussians: List[Gaussians3D] = []
     original_median_radii: List[float] = []
 
-    for idx, view in enumerate(layout.views):
-        _progress("sharp", idx, side_count)
-        face_name = view.name
-        face_img = faces[face_name]  # (H, W, 3) uint8
+    total_faces = side_count + (len(cap_faces) if cap_faces else 0)
+    done = 0
 
-        LOGGER.info("SHARP predict: face %d/%d (%s)", idx + 1, side_count, face_name)
-
-        # 6a. Run SHARP
-        gaussians = predict_image(predictor, face_img, f_px_tuple, device)
-
-        LOGGER.info(
-            "  -> %d Gaussians before clipping",
-            gaussians.mean_vectors.shape[1],
+    # Horizon faces
+    for view in layout.views:
+        _progress("sharp", done, total_faces)
+        LOGGER.info("SHARP predict (horizon): %s", view.name)
+        g, pre_radius = _process_face(
+            view, faces[view.name],
+            effective_focal_x, effective_focal_y, effective_width, effective_height,
+            da360_disparity, predictor, device,
+            clip_fn=lambda gg: filter_gaussians_by_view_border(
+                gg, clip_degrees, vertical_degrees=horizon_vertical_clip),
         )
+        done += 1
+        if g is not None:
+            all_gaussians.append(g)
+            original_median_radii.append(pre_radius)
+            LOGGER.info("  -> %d world Gaussians", g.mean_vectors.shape[1])
 
-        # ------------------------------------------------------------------
-        # 7. Hard Voronoi border clipping (horizontal only)
-        # ------------------------------------------------------------------
-        gaussians = filter_gaussians_by_view_border(gaussians, clip_degrees)
-        LOGGER.info(
-            "  -> %d Gaussians after clipping (%.1f deg)",
-            gaussians.mean_vectors.shape[1], clip_degrees,
-        )
+    # Cap faces (nadir/zenith)
+    if cap_layout is not None:
+        for view in cap_layout.views:
+            _progress("sharp", done, total_faces)
+            LOGGER.info("SHARP predict (cap): %s", view.name)
+            g, pre_radius = _process_face(
+                view, cap_faces[view.name],
+                cap_eff_focal, cap_eff_focal, cap_eff_width, cap_eff_height,
+                da360_disparity, predictor, device,
+                clip_fn=lambda gg: filter_gaussians_by_cone(gg, cap_half_angle),
+            )
+            done += 1
+            if g is not None:
+                all_gaussians.append(g)
+                original_median_radii.append(pre_radius)
+                LOGGER.info("  -> %d world Gaussians", g.mean_vectors.shape[1])
 
-        # Store pre-alignment median radius for global restore later
-        original_median_radii.append(float(torch.median(
-            torch.norm(gaussians.mean_vectors, dim=-1),
-        ).item()))
-
-        # ------------------------------------------------------------------
-        # 8. DA360 alignment
-        # ------------------------------------------------------------------
-        ref_disp_view = extract_perspective_scalar_view(
-            da360_disparity,
-            effective_width,
-            effective_height,
-            effective_focal_x,
-            effective_focal_y,
-            view,
-        )
-        gaussians, med_scale, n_samples = align_gaussians_to_reference(
-            gaussians,
-            ref_disp_view,
-            effective_focal_x,
-            effective_focal_y,
-            effective_width,
-            effective_height,
-            grid_resolution=8,
-        )
-        LOGGER.info(
-            "  Aligned %s: median_scale=%.4f (%d samples)",
-            view.name, med_scale, n_samples,
-        )
-
-        # ------------------------------------------------------------------
-        # 9. Rotate into world frame
-        # ------------------------------------------------------------------
-        R = view.rotation_matrix  # 3x3
-        transform = torch.zeros(3, 4, device=device, dtype=torch.float32)
-        transform[:3, :3] = torch.from_numpy(R).float().to(device)
-        # Translation is zero (viewer at origin)
-
-        gaussians = apply_transform(gaussians, transform)
-
-        all_gaussians.append(gaussians)
-        LOGGER.info(
-            "  -> %d Gaussians in world frame",
-            gaussians.mean_vectors.shape[1],
-        )
-
-    _progress("sharp", side_count, side_count)
+    _progress("sharp", total_faces, total_faces)
 
     # ------------------------------------------------------------------
     # 10. Merge all faces
     # ------------------------------------------------------------------
     merged = merge_gaussians(all_gaussians)
     total_gaussians = merged.mean_vectors.shape[1]
-    LOGGER.info("Merged: %d total Gaussians from %d faces", total_gaussians, side_count)
+    LOGGER.info("Merged: %d total Gaussians from %d faces", total_gaussians, total_faces)
 
     # ------------------------------------------------------------------
     # 11. Global scale restore
@@ -995,6 +1140,6 @@ def convert_sharp360(
 
     return {
         "num_gaussians": total_gaussians,
-        "num_faces": side_count,
+        "num_faces": total_faces,
         "output_path": str(out_path),
     }
