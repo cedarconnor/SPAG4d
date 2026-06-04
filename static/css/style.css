@@ -281,6 +281,21 @@ body {
     opacity: 0.5;
 }
 
+.demo-video {
+    max-width: 90%;
+    max-height: 80%;
+    object-fit: contain;
+    border-radius: 8px;
+    box-shadow: 0 4px 28px rgba(0, 0, 0, 0.45);
+}
+
+.demo-caption {
+    font-size: 0.82rem;
+    opacity: 0.6;
+    text-align: center;
+    max-width: 80%;
+}
+
 /* Compact Controls Panel */
 .controls-panel {
     background: var(--bg-glass);
