@@ -155,12 +155,16 @@ def _docker_prefix(config, scene_wsl, *, workdir="/workspace/artifixer",
         "-e PYTHONUNBUFFERED=1",
         "-e PYTHONFAULTHANDLER=1",
         f"-e TORCH_HOME={config.torch_cache}",
+        # Persist the compiled lib3dgut_cc extension (~3 min) across --rm containers.
+        "-e TORCH_EXTENSIONS_DIR=/root/.cache/torch_extensions",
     ]
     envs += [f"-e {e}" for e in extra_envs]
     mounts = [
         f"-v {config.artifixer_repo}:/workspace/artifixer",
         "-v /data:/data",
         f"-v {scene_wsl}:/scene",
+        # Persist the 3DGRUT CUDA-extension build dir (host-side under torch_cache).
+        f"-v {config.torch_cache}/torch_extensions:/root/.cache/torch_extensions",
     ]
     mounts += [f"-v {m}" for m in extra_mounts]
     parts = [

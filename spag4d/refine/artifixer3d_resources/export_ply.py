@@ -11,7 +11,7 @@ import sys
 import torch
 
 sys.path.insert(0, "/workspace/artifixer")
-sys.path.insert(0, "/workspace/thirdparty/3DGRUT-ArtiFixer")
+sys.path.insert(0, "/workspace/artifixer/thirdparty/3DGRUT-ArtiFixer")
 from threedgrut.model.model import MixtureOfGaussians
 
 CKPT = sys.argv[1]
