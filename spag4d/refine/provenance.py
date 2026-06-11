@@ -55,6 +55,7 @@ PROVENANCE_ORIGINAL = 0
 PROVENANCE_DENSIFIED = 1
 PROVENANCE_OMNIROAM = 2
 PROVENANCE_GAP_SEED = 3
+PROVENANCE_ARTIFIXER3D = 4
 
 
 def tag_provenance_by_range(gaussians, start_idx, end_idx, tag_value):

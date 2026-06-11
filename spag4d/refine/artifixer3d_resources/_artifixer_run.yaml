@@ -1,0 +1,4 @@
+# @package _global_
+defaults:
+  - apps/colmap_3dgut_sparse_mcmc@_global_
+  - _self_

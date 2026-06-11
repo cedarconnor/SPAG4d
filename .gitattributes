@@ -1,0 +1,4 @@
+# ArtiFixer3D container resources run inside WSL/Linux (bash + hydra) — must stay LF.
+spag4d/refine/artifixer3d_resources/*.sh   text eol=lf
+spag4d/refine/artifixer3d_resources/*.yaml text eol=lf
+spag4d/refine/artifixer3d_resources/*.py   text eol=lf
