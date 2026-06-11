@@ -103,6 +103,36 @@ Native Windows is supported (pure-PyTorch; the import chain is verified). If `op
 
 ---
 
+## ArtiFixer3D refine backend (optional, WSL2 + Docker)
+
+The refine stage offers two repair backends. **OmniRoam** (the default) runs natively and augments
+the existing cloud. **ArtiFixer3D** is a higher-quality, slower alternative (NVIDIA SIL, SIGGRAPH 2026):
+it rebuilds the whole cloud through a 14B generative disocclusion-repair model and a 3DGRUT MCMC
+distillation. It runs as Docker subprocesses inside WSL2 — the SPAG-4D core and OmniRoam stay native;
+**only `--backend artifixer3d` needs the stack below.**
+
+One-time prerequisites (validated in the Phase 0/1 evaluation):
+
+1. **WSL2 Ubuntu + Docker Engine + NVIDIA Container Toolkit.** GPU-in-container must work:
+   `docker run --rm --gpus all artifixer:cuda12 nvidia-smi` lists your GPU.
+2. **ArtiFixer cloned with submodules** at `~/ArtiFixer` (default `artifixer_repo`), including the
+   vendored `thirdparty/3DGRUT-ArtiFixer`.
+3. **`artifixer:cuda12` image built** from that repo's Dockerfile.
+4. **14B checkpoint** at `/data/artifixer-checkpoints/artifixer-14b.pt`.
+5. **Hydra wrapper configs copied in.** Copy `spag4d/refine/artifixer3d_resources/_artifixer_run.yaml`
+   and `_artifixer_distill.yaml` into `~/ArtiFixer/thirdparty/3DGRUT-ArtiFixer/configs/` (works around a
+   hydra 1.3.2 config-composition bug in the reconstruct/distill path).
+6. **Local Wan2.1 mirror.** Run `bash spag4d/refine/artifixer3d_resources/setup_wan_mirror.sh` once
+   (inside WSL) to populate `/data/wan_te`. This avoids the HF `hf_xet` native downloader, which
+   hard-crashes (silent exit-255) in the container; every backend run uses `HF_HUB_OFFLINE=1` +
+   `--model_id /data/wan_te`.
+
+Needs the A6000-class GPU (~48 GB VRAM). A full backend run is multi-stage (recon + 14B inference +
+distill) and takes tens of minutes per scene — far slower than OmniRoam. See
+`docs/artifixer3d_integration_design.md` and `experiments/artifixer_eval/RESULT.md`.
+
+---
+
 ## What Gets Downloaded
 
 | Component | Size | Purpose |
