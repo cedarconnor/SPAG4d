@@ -464,8 +464,13 @@ async def start_refinement_v2(
     trajectory_mode: str = Query("auto", description="auto | all | forward,left,..."),
     tier2_weight: float = Query(0.20, ge=0.05, le=0.5),
     upscale_backend: str = Query("none", description="none | seedvr2"),
+    backend: str = Query("omniroam", description="omniroam | artifixer3d"),
 ):
-    """Start OmniRoam-based refinement (v2) on an existing conversion job."""
+    """Start refinement (v2) on an existing conversion job.
+
+    ``backend=omniroam`` (default) runs the native OmniRoam augment path;
+    ``backend=artifixer3d`` runs the WSL/Docker ArtiFixer3D rebuild path.
+    """
     if job_id not in jobs:
         raise HTTPException(404, "Source job not found")
 
@@ -483,7 +488,7 @@ async def start_refinement_v2(
     refine_id = str(uuid.uuid4())
     refine_job = RefineJobInfo(refine_id, job_id)
     refine_job.params = {
-        "backend": "omniroam",
+        "backend": backend,
         "max_rounds": max_rounds,
         "trajectory_mode": trajectory_mode,
         "tier2_weight": tier2_weight,
@@ -498,7 +503,7 @@ async def start_refinement_v2(
     return JSONResponse({
         "refine_job_id": refine_id,
         "status": "queued",
-        "backend": "omniroam",
+        "backend": backend,
     })
 
 
@@ -527,8 +532,37 @@ async def process_refinement_v2(refine_job: RefineJobInfo, source_job: JobInfo):
         refine_job.last_updated = time.time()
 
 
+def _run_refinement_artifixer3d(source_job: JobInfo, refine_job: RefineJobInfo) -> dict:
+    """Execute the ArtiFixer3D (Shape A) refine backend (blocking, runs in thread)."""
+    from spag4d.refine import ArtiFixer3DConfig, refine_splat_artifixer3d
+
+    def update_progress(stage):
+        refine_job.stage = stage
+        refine_job.last_updated = time.time()
+
+    config = ArtiFixer3DConfig(enabled=True)
+    config.work_dir = str(TEMP_DIR / f"{refine_job.refine_id}_artifixer3d")
+
+    result = refine_splat_artifixer3d(
+        cloud_ply=str(source_job.output_ply_path),
+        config=config,
+        output_path=str(refine_job.output_ply_path),
+        progress_callback=update_progress,
+    )
+
+    return {
+        "initial_hole_fraction": result["initial_hole_fraction"],
+        "final_hole_fraction": result["final_hole_fraction"],
+        "final_count": result["gaussians_count"],
+        "backend": "artifixer3d",
+    }
+
+
 def _run_refinement_v2(source_job: JobInfo, refine_job: RefineJobInfo) -> dict:
-    """Execute the OmniRoam refinement pipeline (blocking, runs in thread)."""
+    """Execute the selected refine backend (blocking, runs in thread)."""
+    if refine_job.params.get("backend") == "artifixer3d":
+        return _run_refinement_artifixer3d(source_job, refine_job)
+
     import numpy as np
     from spag4d.refine import refine_splat_v2
     from spag4d.refine.omniroam_config import OmniRoamConfig
