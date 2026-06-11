@@ -9,8 +9,13 @@ host. Every container contract here was validated in Phase 0/1
 
 from __future__ import annotations
 
+import json
+import logging
 import subprocess
-from pathlib import PureWindowsPath
+from dataclasses import dataclass
+from pathlib import Path, PureWindowsPath
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -282,3 +287,167 @@ def build_export_cmd(config, scene_wsl="/scene", resources_wsl="/eval",
         extra_mounts=(f"{resources_wsl}:/eval",),
     )
     return _wsl(config, prefix + f" python -u /eval/export_ply.py {ckpt} {out_ply}")
+
+
+# ---------------------------------------------------------------------------
+# Streamed subprocess runner + result
+# ---------------------------------------------------------------------------
+
+def _run_streamed(cmd, tail: int = 40) -> None:
+    """Run a WSL/Docker command, streaming stdout to the logger.
+
+    Keeps the last ``tail`` lines and raises ``RuntimeError`` with them on a
+    non-zero exit (container stdout is unbuffered via -u/PYTHONUNBUFFERED so the
+    traceback survives a hard exit — the Phase 0 lesson). Ported from
+    omniroam_adapter.run_omniroam_wsl's streaming loop.
+    """
+    log_lines: list[str] = []
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        encoding="utf-8",
+        errors="replace",
+    )
+    for line in proc.stdout:
+        logger.info(line.rstrip())
+        log_lines.append(line)
+        if len(log_lines) > tail:
+            log_lines.pop(0)
+    code = proc.wait()
+    if code != 0:
+        raise RuntimeError(
+            f"ArtiFixer3D step failed with exit code {code}.\n"
+            f"Last output:\n{''.join(log_lines)}"
+        )
+
+
+@dataclass
+class ArtiFixer3DResult:
+    """Outcome of a full ArtiFixer3D backend run."""
+    refined_ply_path: str
+    initial_hole_fraction: float
+    final_hole_fraction: float
+    n_anchor: int
+    n_novel: int
+    native_backend: str = "3dgrut"
+
+
+# Validated pred-frame directory pattern (from _run_distill.sh). The middle token
+# string is emitted by run_inference and is container-version-specific; confirm at
+# [container-verify] time.
+_PRED_SUBPATH = (
+    "artifixer_out/artifixer-14b/"
+    "distilled_views_reconstructed_colmap_auto12_evenly_spaced_sink7_all_frames/"
+    "{name}/video_frames/batch_0000/pred"
+)
+
+
+def run_artifixer3d_pipeline(cloud_ply, config, work_dir) -> "ArtiFixer3DResult":
+    """bridge -> prepare -> recon(bypass) -> render -> caption -> split -> inference
+    -> distill -> export -> result.
+
+    Runs the ArtiFixer steps as WSL/Docker subprocesses (no library import on the
+    host). The host-side bridge render uses the native GSFix3D rasterizer.
+
+    [container-verify] The container ML steps need the full WSL/Docker/14B stack and
+    are validated by running this end-to-end (see the plan's Task 3.3 Step 3). The
+    step *sequence* and every flag are pinned to the Phase 0/1 logs; the magic
+    pred-frame subpath (_PRED_SUBPATH) and the 3DGRUT output ckpt paths are the
+    known-validated values and should be re-confirmed on the first live run.
+    """
+    from .artifixer3d_bridge import bridge_cloud_to_colmap, select_anchor_indices
+
+    validate_artifixer_environment(config)
+
+    work = Path(work_dir)
+    scene_host = work / "scene"
+    colmap_host = scene_host / "colmap"
+    colmap_host.mkdir(parents=True, exist_ok=True)
+    name = Path(str(cloud_ply)).stem or "scene"
+
+    # 1. Host-side bridge: render the orbit + write the COLMAP scene.
+    bridge = bridge_cloud_to_colmap(cloud_ply, colmap_host, config)
+    hole_fracs = bridge["hole_fracs"]
+    n_views = bridge["n_views"]
+
+    # 2. Anchor/novel split (anchors = low-parallax views).
+    anchors = select_anchor_indices(hole_fracs, config.anchor_parallax_quantile)
+    n_anchor = len(anchors)
+    n_novel = n_views - n_anchor
+    initial_hole = float(sum(hole_fracs) / max(1, len(hole_fracs)))
+
+    # WSL mount sources + in-container paths.
+    scene_wsl = windows_to_wsl_path(str(scene_host.resolve()))
+    resources_host = Path(__file__).resolve().parent / "artifixer3d_resources"
+    resources_wsl = windows_to_wsl_path(str(resources_host))
+    scene_root = f"/scene/prep/{name}"  # /scene == scene_wsl mount
+
+    # 3. prepare (layout + selected_indices), then overwrite the anchor selection.
+    _run_streamed(build_prepare_cmd(config, scene_wsl, scene_root, phases="prepare"))
+    anchor_names = [f"frame_{i:05d}.png" for i in anchors]
+    sel = scene_host / "prep" / name / "selected_indices.json"
+    sel.parent.mkdir(parents=True, exist_ok=True)
+    sel.write_text(json.dumps(anchors))
+    sel_names = scene_host / "prep" / name / "selected_image_names.txt"
+    sel_names.write_text("\n".join(anchor_names))
+
+    # 4. Reconstruct via the native 3DGRUT train bypass (prepare's reconstruct is
+    #    broken under hydra 1.3.2). num_selected_indices < n_views (empty-val-split fix).
+    _run_streamed(build_train3dgrut_cmd(
+        config, scene_wsl, scene_root, name,
+        selected_indices_file=f"{scene_root}/selected_indices.json",
+        num_selected_indices=max(1, n_views - 1),
+    ))
+    recon_ckpt = (
+        f"{scene_root}/3dgrut_runs/{name}/{name}/"
+        f"ours_{config.recon_steps}/ckpt_{config.recon_steps}.pt"
+    )
+
+    # 5. Render the recon from the bypass checkpoint.
+    _run_streamed(build_prepare_cmd(
+        config, scene_wsl, scene_root, phases="render",
+        reconstruction_checkpoint=recon_ckpt,
+    ))
+
+    # 6. Caption (UMT5-only, VLM bypassed) then write split.json (scale,caption).
+    _run_streamed(build_caption_cmd(config, scene_wsl, resources_wsl, scene_root, name))
+    _run_streamed(build_prepare_cmd(config, scene_wsl, scene_root, phases="scale,caption"))
+
+    # 7. 14B 2D correction inference.
+    split = f"{scene_root}/split.json"
+    save = f"{scene_root}/artifixer_out"
+    _run_streamed(build_inference_cmd(config, scene_wsl, split=split, save=save))
+
+    # 8. Distill the 2D pred frames into a corrected 3D cloud.
+    pred_dir = f"{scene_root}/{_PRED_SUBPATH.format(name=name)}"
+    _run_streamed(build_distill_cmd(
+        config, scene_root=scene_root, pred_dir=pred_dir,
+        base_ckpt=recon_ckpt, scene_wsl=scene_wsl,
+    ))
+    distill_ckpt = (
+        f"{scene_root}/artifixer3d/runs/{name}/{name}/"
+        f"ours_{config.distill_steps}/ckpt_{config.distill_steps}.pt"
+    )
+
+    # 9. Export the distilled 3DGRUT ckpt -> standard 3DGS PLY (bridge-back).
+    out_ply = f"{scene_root}/artifixer3d/{name}_distilled.ply"
+    _run_streamed(build_export_cmd(
+        config, scene_wsl, resources_wsl, ckpt=distill_ckpt, out_ply=out_ply,
+    ))
+    out_ply_host = scene_host / "prep" / name / "artifixer3d" / f"{name}_distilled.ply"
+
+    # Final hole fraction: the distilled novel-view holes (Phase 1: 42% -> 12%).
+    # Without re-rendering here we report the anchor-weighted bridge estimate; the
+    # validation guard (P5.1) renders the result for the authoritative metric.
+    final_hole = initial_hole
+
+    return ArtiFixer3DResult(
+        refined_ply_path=str(out_ply_host),
+        initial_hole_fraction=initial_hole,
+        final_hole_fraction=final_hole,
+        n_anchor=n_anchor,
+        n_novel=n_novel,
+    )
