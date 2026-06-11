@@ -27,7 +27,8 @@ def test_write_cameras_bin_roundtrip(tmp_path):
     data = p.read_bytes()
     (n_cams,) = struct.unpack("<Q", data[:8])
     assert n_cams == 1
-    cam_id, model_id, w, h = struct.unpack("<iiQQ", data[8:28])
+    # COLMAP camera record: int32 cam_id, int32 model_id, uint64 w, uint64 h = 24 bytes
+    cam_id, model_id, w, h = struct.unpack("<iiQQ", data[8:32])
     assert model_id == 4 and w == 640 and h == 640
 
 
