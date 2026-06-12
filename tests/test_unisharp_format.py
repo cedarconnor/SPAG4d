@@ -43,3 +43,25 @@ class TestCount:
     def test_counts_vertices(self, tmp_path):
         ply = write_fake_unisharp_ply(tmp_path / "g.ply", n_vertices=42)
         assert count_ply_vertices(str(ply)) == 42
+
+
+from spag4d.unisharp_format import copy_unisharp_ply_to_output
+
+
+class TestCopy:
+    def test_copy_preserves_vertices_and_supplements(self, tmp_path):
+        src = write_fake_unisharp_ply(tmp_path / "src.ply", n_vertices=17,
+                                      with_supplements=True)
+        dst = tmp_path / "out.ply"
+        stats = copy_unisharp_ply_to_output(str(src), str(dst))
+        assert dst.exists()
+        assert stats["num_gaussians"] == 17
+        assert set(stats["ply_info"]["supplement_elements"]) == {
+            "extrinsic", "intrinsic", "image_size"
+        }
+
+    def test_copy_is_byte_identical(self, tmp_path):
+        src = write_fake_unisharp_ply(tmp_path / "src.ply", n_vertices=8)
+        dst = tmp_path / "out.ply"
+        copy_unisharp_ply_to_output(str(src), str(dst))
+        assert dst.read_bytes() == src.read_bytes()

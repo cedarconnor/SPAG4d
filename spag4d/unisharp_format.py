@@ -54,3 +54,21 @@ def count_ply_vertices(ply_path: str) -> int:
         if el.name == "vertex":
             return int(el.count)
     return 0
+
+
+def copy_unisharp_ply_to_output(src_path: str, dst_path: str) -> dict:
+    """Copy raw UniSHARP PLY verbatim and count vertices.
+
+    Keeps supplement elements intact. Works in viewers that tolerate extra PLY
+    elements (SuperSplat, GaussianSplats3D). Use convert mode for strict loaders.
+    """
+    shutil.copy2(src_path, dst_path)
+    n = count_ply_vertices(dst_path)
+    info = inspect_ply_fields(dst_path)
+    if info["supplement_elements"]:
+        LOGGER.info(
+            "UniSHARP PLY carries supplement elements %s; "
+            "strict loaders may need format_mode='convert'.",
+            info["supplement_elements"],
+        )
+    return {"num_gaussians": n, "ply_info": info}
