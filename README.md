@@ -73,6 +73,12 @@ Each pixel becomes one Gaussian (at stride 1) or every Nth pixel (stride 2, 4, �
 
 SHARP predicts Gaussians directly from images — no separate depth model. The DA360 alignment makes faces agree on scale at their boundaries. **Pole-cap faces** (looking straight down/up) fill the holes the horizon ring leaves at the nadir and zenith, and the horizon/cap seam is tunable (see [SHARP 360 settings](#sharp-360-settings)).
 
+### UniSHARP 360 (native ERP, optional)
+
+A `sharp360` backend that runs [Insta360 UniSHARP](https://github.com/Insta360-Research-Team/UniSHARP) on the **whole equirectangular panorama at once** (`--camera panorama`) instead of decomposing it into cubemap faces — no face seams to reconcile. UniSHARP runs **out-of-process** in its own conda env (Python 3.12 / torch 2.8) via subprocess; it is never imported into SPAG4d. It is a native-ERP **quality** upgrade (cleaner poles/seams), not a camera-travel jump — its novel-view baseline is small (0.2 m forward / 0.1 m rotate radius), same envelope as the per-face SHARP path.
+
+Requires a local UniSHARP clone, its conda python, and a checkpoint (see [the smoke runbook](docs/unisharp_smoke_runbook.md) for one-time setup). Select it with `--generator unisharp360` or `--generator sharp360 --sharp-backend unisharp`.
+
 ---
 
 ## Usage
@@ -106,6 +112,16 @@ python -m spag4d download-models --model pager
 python -m spag4d convert panorama.jpg output.ply --generator pager
 python -m spag4d convert panorama.jpg output.ply --generator pager --pager-use-sky --pager-use-normals
 python -m spag4d convert panorama.jpg output.ply --generator pager --pager-metric
+
+# UniSHARP 360 (native-ERP, optional; subprocess in its own conda env)
+python -m spag4d convert panorama.jpg output.ply \
+  --generator unisharp360 \
+  --unisharp-repo D:/repos/UniSHARP \
+  --unisharp-python D:/envs/unisharp/python.exe \
+  --unisharp-checkpoint D:/models/unisharp/step_0100000.pt
+# Env fallbacks: SPAG4D_UNISHARP_REPO / _PYTHON / _CHECKPOINT.
+# Add --unisharp-format-mode convert for strict PLY loaders,
+#     --unisharp-save-debug to keep the raw PLY + gifs + metadata.
 
 # Pre-download model weights
 python -m spag4d download-models               # DAP + DA360
@@ -234,7 +250,8 @@ SeedVR2 runs as a native Windows subprocess — no WSL2 required.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `generator` | `da360` | `da360`, `dap`, `sharp360`, or `pager` |
+| `generator` | `da360` | `da360`, `dap`, `sharp360`, `unisharp360`, or `pager` |
+| `sharp_backend` | `sharp` | `sharp360` backend: `sharp` (per-face), `unisharp` (native ERP), or `hybrid` (planned) |
 
 ### DA360 / DAP / PaGeR (depth-based)
 
@@ -351,6 +368,9 @@ spag4d/                          # Core conversion pipeline
   pager_model.py                 # PaGeR depth + sky mask + normals
   pager_arch/PaGeR/              # Vendored prs-eth/PaGeR (DA3 cubemap), @99188f2
   sharp360.py                    # SHARP 360: horizon + pole-cap faces, predict, align, merge
+  unisharp360.py                 # UniSHARP backend wrapper (validate, run, format, stats)
+  unisharp_adapter.py            # UniSHARP subprocess runner (infer_unisharp.py, own conda env)
+  unisharp_format.py             # UniSHARP PLY inspect / count / copy / convert
   sharp_arch/ml-sharp/           # Vendored Apple SHARP model
   seedvr2.py                     # Native Windows SeedVR2 adapter (image + video)
   scene_analysis.py              # Scale-relative defaults (sky-mask aware)
