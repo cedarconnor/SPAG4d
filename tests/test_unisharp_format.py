@@ -65,3 +65,46 @@ class TestCopy:
         dst = tmp_path / "out.ply"
         copy_unisharp_ply_to_output(str(src), str(dst))
         assert dst.read_bytes() == src.read_bytes()
+
+
+from spag4d.unisharp_format import convert_unisharp_ply_to_spag
+
+
+class TestConvert:
+    def test_convert_drops_supplements_keeps_core(self, tmp_path):
+        src = write_fake_unisharp_ply(tmp_path / "src.ply", n_vertices=20,
+                                      with_supplements=True)
+        dst = tmp_path / "out.ply"
+        stats = convert_unisharp_ply_to_spag(str(src), str(dst))
+        assert stats["num_gaussians"] == 20
+        assert stats["converted"] is True
+
+        info = inspect_ply_fields(str(dst))
+        assert info["supplement_elements"] == []
+        assert info["has_core_fields"] is True
+
+    def test_convert_preserves_vertex_values(self, tmp_path):
+        from plyfile import PlyData
+        import numpy as np
+
+        src = write_fake_unisharp_ply(tmp_path / "src.ply", n_vertices=12)
+        dst = tmp_path / "out.ply"
+        convert_unisharp_ply_to_spag(str(src), str(dst))
+
+        a = PlyData.read(str(src))["vertex"]
+        b = PlyData.read(str(dst))["vertex"]
+        for f in CORE_VERTEX_FIELDS:
+            np.testing.assert_allclose(np.asarray(a[f]), np.asarray(b[f]), rtol=1e-6)
+
+    def test_convert_raises_on_missing_core_field(self, tmp_path):
+        from plyfile import PlyData, PlyElement
+        import numpy as np
+
+        # A PLY missing opacity should raise KeyError.
+        bad_fields = [f for f in CORE_VERTEX_FIELDS if f != "opacity"]
+        arr = np.zeros(5, dtype=[(n, "f4") for n in bad_fields])
+        bad = tmp_path / "bad.ply"
+        PlyData([PlyElement.describe(arr, "vertex")], text=False).write(str(bad))
+
+        with pytest.raises(KeyError, match="opacity"):
+            convert_unisharp_ply_to_spag(str(bad), str(tmp_path / "out.ply"))

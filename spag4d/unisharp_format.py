@@ -72,3 +72,32 @@ def copy_unisharp_ply_to_output(src_path: str, dst_path: str) -> dict:
             info["supplement_elements"],
         )
     return {"num_gaussians": n, "ply_info": info}
+
+
+def convert_unisharp_ply_to_spag(src_path: str, dst_path: str) -> dict:
+    """Rewrite UniSHARP PLY as a clean INRIA 3DGS PLY.
+
+    Drops supplement elements, keeps exactly CORE_VERTEX_FIELDS in order.
+    Scales stay log, opacity stays logit, quats stay wxyz. Colors (f_dc) are
+    preserved as-is by default; color_space conversion is deferred until the
+    real encoding is confirmed (M1.5).
+    """
+    from plyfile import PlyData, PlyElement
+    import numpy as np
+
+    ply = PlyData.read(src_path)
+    vtx = next(el for el in ply.elements if el.name == "vertex")
+    present = {p.name for p in vtx.properties}
+
+    missing = [f for f in CORE_VERTEX_FIELDS if f not in present]
+    if missing:
+        raise KeyError(f"UniSHARP PLY missing core fields: {missing}")
+
+    dtype = [(name, "f4") for name in CORE_VERTEX_FIELDS]
+    arr = np.empty(int(vtx.count), dtype=dtype)
+    for name in CORE_VERTEX_FIELDS:
+        arr[name] = np.asarray(vtx[name]).astype("f4")
+
+    el = PlyElement.describe(arr, "vertex")
+    PlyData([el], text=False).write(dst_path)
+    return {"num_gaussians": int(len(arr)), "converted": True}
