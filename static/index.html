@@ -180,6 +180,7 @@
                             <option value="da360" selected>DA360</option>
                             <option value="dap">DAP</option>
                             <option value="sharp360">SHARP 360</option>
+                            <option value="unisharp360">UniSHARP 360</option>
                             <option value="pager">PaGeR (NC)</option>
                         </select>
                     </div>
@@ -217,6 +218,23 @@
                             <input type="range" id="sharp-seam-lat" min="10" max="60" step="5" value="30"
                                 style="width: 80px;"
                                 oninput="document.getElementById('sharp-seam-lat-val').innerHTML=this.value+'&deg;'">
+                        </div>
+                    </div>
+
+                    <div id="unisharp360-settings" style="display:none;"
+                        title="UniSHARP native-ERP backend. Runs out-of-process via subprocess. Repo/python/checkpoint come from SPAG4D_UNISHARP_* env vars set at server launch.">
+                        <div class="field" style="min-width: 90px;">
+                            <label for="unisharp-format-mode">PLY Mode</label>
+                            <select id="unisharp-format-mode" style="width: 80px;"
+                                title="convert = reoriented + denoised clean INRIA PLY (recommended). copy = raw UniSHARP PLY verbatim (upside-down, supplements intact) for debugging.">
+                                <option value="convert" selected>convert</option>
+                                <option value="copy">copy</option>
+                            </select>
+                        </div>
+                        <div class="field" style="min-width: 80px;">
+                            <label for="unisharp-save-debug">Save Debug</label>
+                            <input type="checkbox" id="unisharp-save-debug"
+                                title="Keep raw PLY, forward/rotate gifs, and metadata next to the output.">
                         </div>
                     </div>
 

@@ -387,6 +387,16 @@ body {
     align-items: flex-end;
 }
 
+/* Generator-specific settings panels: their controls must flow as direct
+   items of .params-row, not stack as a block. `display: contents` makes the
+   wrapper transparent so its .field/.param-group children align with the rest
+   of the row. The JS toggles between this (shown) and `none` (hidden). */
+#sharp360-settings,
+#unisharp360-settings,
+#pager-settings {
+    display: contents;
+}
+
 .param-group {
     display: flex;
     flex-direction: column;

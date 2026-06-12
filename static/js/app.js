@@ -31,6 +31,7 @@ class SPAG4DApp {
         this.sideCountInput = document.getElementById('side-count');
         this.seedvr2UpscaleInput = document.getElementById('seedvr2-upscale');
         this.sharp360Settings = document.getElementById('sharp360-settings');
+        this.unisharpSettings = document.getElementById('unisharp360-settings');
         this.pagerSettings = document.getElementById('pager-settings');
         this.pagerMetricInput = document.getElementById('pager-metric');
         this.pagerUseSkyInput = document.getElementById('pager-use-sky');
@@ -134,6 +135,7 @@ class SPAG4DApp {
     updateGeneratorUI() {
         const gen = this.generatorInput.value;
         this.sharp360Settings.style.display = gen === 'sharp360' ? '' : 'none';
+        this.unisharpSettings.style.display = gen === 'unisharp360' ? '' : 'none';
         this.pagerSettings.style.display = gen === 'pager' ? '' : 'none';
     }
 
@@ -249,6 +251,11 @@ class SPAG4DApp {
             paramObj.pager_metric = this.pagerMetricInput.checked ? 'true' : 'false';
             paramObj.pager_use_sky = this.pagerUseSkyInput.checked ? 'true' : 'false';
             paramObj.pager_use_normals = this.pagerUseNormalsInput.checked ? 'true' : 'false';
+        } else if (generator === 'unisharp360') {
+            // generator drives routing; do NOT set depth_model (API regex allows only dap|da360).
+            // repo/python/checkpoint resolve from SPAG4D_UNISHARP_* env vars at server launch.
+            paramObj.unisharp_format_mode = document.getElementById('unisharp-format-mode')?.value || 'copy';
+            paramObj.unisharp_save_debug = document.getElementById('unisharp-save-debug')?.checked ? 'true' : 'false';
         } else {
             // Pass depth_model for backward compat — da360/dap map directly
             paramObj.depth_model = generator;

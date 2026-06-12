@@ -172,6 +172,28 @@ if exist "%SPAG4D_CACHE%\DA360_large.pth" (
 )
 
 :: ──────────────────────────────────────────────────
+:: Optional: UniSHARP 360 backend (native-ERP generator)
+:: ──────────────────────────────────────────────────
+echo.
+echo ==================================================
+echo   Optional: UniSHARP 360 backend (native-ERP generator)
+echo ==================================================
+echo   Adds the "UniSHARP 360" generator (Insta360 UniSHARP) to the CLI and web
+echo   UI. Runs out-of-process in its own venv, so it cannot disturb SPAG core.
+echo   Native Windows -- no WSL needed (UniK3D's KNN op is eval-only and gsplat
+echo   is never compiled because inference uses --no-render).
+echo.
+echo   Needs ~10 GB disk (torch ~3 GB + checkpoint 4.7 GB) and an NVIDIA GPU.
+echo.
+set "WANT_UNISHARP=N"
+set /p WANT_UNISHARP="Set up the UniSHARP 360 backend now? (y/N): "
+if /i "!WANT_UNISHARP!"=="y" (
+    call "%~dp0scripts\setup_unisharp_windows.bat"
+) else (
+    echo    [SKIP] UniSHARP not configured. Run scripts\setup_unisharp_windows.bat later.
+)
+
+:: ──────────────────────────────────────────────────
 :: Optional: ArtiFixer3D refine backend (WSL2 + Docker)
 :: ──────────────────────────────────────────────────
 echo.
@@ -242,7 +264,7 @@ echo.
 echo   Run 'run.bat' to start SPAG-4D.
 echo   Opens http://localhost:7860 in your browser.
 echo.
-echo   Depth models: DAP + DA360 (+ optional PaGeR, non-commercial)
+echo   Generators: DA360 + DAP + SHARP 360 (+ optional UniSHARP 360, PaGeR)
 echo   Refine: OmniRoam (default, WSL2) + optional ArtiFixer3D (WSL2/Docker)
 echo ==================================================
 echo.

@@ -75,9 +75,11 @@ SHARP predicts Gaussians directly from images — no separate depth model. The D
 
 ### UniSHARP 360 (native ERP, optional)
 
-A `sharp360` backend that runs [Insta360 UniSHARP](https://github.com/Insta360-Research-Team/UniSHARP) on the **whole equirectangular panorama at once** (`--camera panorama`) instead of decomposing it into cubemap faces — no face seams to reconcile. UniSHARP runs **out-of-process** in its own conda env (Python 3.12 / torch 2.8) via subprocess; it is never imported into SPAG4d. It is a native-ERP **quality** upgrade (cleaner poles/seams), not a camera-travel jump — its novel-view baseline is small (0.2 m forward / 0.1 m rotate radius), same envelope as the per-face SHARP path.
+A generator that runs [Insta360 UniSHARP](https://github.com/Insta360-Research-Team/UniSHARP) on the **whole equirectangular panorama at once** (`--camera panorama`) instead of decomposing it into cubemap faces — no face seams to reconcile. UniSHARP runs **out-of-process** in its own venv (Python 3.11 / torch 2.8) via subprocess; it is never imported into SPAG4d. It is a native-ERP **quality** upgrade (cleaner poles/seams), not a camera-travel jump — its novel-view baseline is small (0.2 m forward / 0.1 m rotate radius), same envelope as the per-face SHARP path.
 
-Requires a local UniSHARP clone, its conda python, and a checkpoint (see [the smoke runbook](docs/unisharp_smoke_runbook.md) for one-time setup). Select it with `--generator unisharp360` or `--generator sharp360 --sharp-backend unisharp`.
+**Setup (native Windows, one-time):** run `scripts\setup_unisharp_windows.bat` (or answer "y" to the UniSHARP prompt in `install.bat`). It creates the isolated venv, installs torch 2.8, clones UniSHARP + UniK3D, patches inference to PLY-only (`--no-render`, so gsplat is never compiled), and downloads the checkpoint. No WSL needed — UniK3D's KNN CUDA op is eval-only and degrades gracefully. The script prints the four `SPAG4D_UNISHARP_*` env vars to set before launching the server.
+
+**Use it** from the web UI (pick **UniSHARP 360** in the Generator dropdown) or the CLI (`--generator unisharp360`). The output is **reoriented** (UniSHARP emits an upside-down, +Y-down frame) and **denoised** (faint/isolated gaussians pruned) by default via PLY Mode **`convert`**; choose **`copy`** for the raw verbatim UniSHARP PLY (upside-down, supplement elements intact) when debugging.
 
 ---
 
@@ -113,15 +115,19 @@ python -m spag4d convert panorama.jpg output.ply --generator pager
 python -m spag4d convert panorama.jpg output.ply --generator pager --pager-use-sky --pager-use-normals
 python -m spag4d convert panorama.jpg output.ply --generator pager --pager-metric
 
-# UniSHARP 360 (native-ERP, optional; subprocess in its own conda env)
+# UniSHARP 360 (native-ERP, optional; subprocess in its own venv)
+# After scripts\setup_unisharp_windows.bat, the paths come from env vars:
+#   SPAG4D_UNISHARP_REPO / _PYTHON / _CHECKPOINT / _NO_RENDER=1
+python -m spag4d convert panorama.jpg output.ply --generator unisharp360
+# ...or pass them explicitly:
 python -m spag4d convert panorama.jpg output.ply \
   --generator unisharp360 \
   --unisharp-repo D:/repos/UniSHARP \
-  --unisharp-python D:/envs/unisharp/python.exe \
-  --unisharp-checkpoint D:/models/unisharp/step_0100000.pt
-# Env fallbacks: SPAG4D_UNISHARP_REPO / _PYTHON / _CHECKPOINT.
-# Add --unisharp-format-mode convert for strict PLY loaders,
-#     --unisharp-save-debug to keep the raw PLY + gifs + metadata.
+  --unisharp-python D:/envs/unisharp/Scripts/python.exe \
+  --unisharp-checkpoint D:/models/unisharp/pretained_model.pt
+# PLY Mode: convert (default) = reoriented + denoised clean INRIA PLY;
+#           copy = raw verbatim UniSHARP PLY (upside-down) for debugging.
+# Add --unisharp-save-debug to keep the raw PLY + metadata.
 
 # Pre-download model weights
 python -m spag4d download-models               # DAP + DA360
@@ -370,7 +376,7 @@ spag4d/                          # Core conversion pipeline
   sharp360.py                    # SHARP 360: horizon + pole-cap faces, predict, align, merge
   unisharp360.py                 # UniSHARP backend wrapper (validate, run, format, stats)
   unisharp_adapter.py            # UniSHARP subprocess runner (infer_unisharp.py, own conda env)
-  unisharp_format.py             # UniSHARP PLY inspect / count / copy / convert
+  unisharp_format.py             # UniSHARP PLY inspect / copy / convert (reorient + denoise)
   sharp_arch/ml-sharp/           # Vendored Apple SHARP model
   seedvr2.py                     # Native Windows SeedVR2 adapter (image + video)
   scene_analysis.py              # Scale-relative defaults (sky-mask aware)

@@ -1,5 +1,13 @@
 # UniSHARP Backend — Smoke & Viewer Reality-Check Runbook (M1.5)
 
+> **Status (resolved):** The backend now runs end-to-end on native Windows via
+> `scripts\setup_unisharp_windows.bat` (no WSL). Findings from this runbook are
+> baked into the code: `color_space` is a PLY **element** (not a comment);
+> inference is **PLY-only** (`--no-render`, gsplat never compiled); and the
+> default PLY Mode is **`convert`**, which **reorients** the upside-down UniSHARP
+> frame (180° about X) and **denoises** faint/isolated gaussians. The steps below
+> remain useful for manual verification of a fresh install.
+
 This is the **manual, GPU-gated** validation step for the UniSHARP `sharp360`
 backend. The code (Tasks 1–9 of the integration plan) is fully unit-tested
 without a GPU; this runbook confirms the backend against a real UniSHARP install

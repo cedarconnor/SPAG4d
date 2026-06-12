@@ -76,6 +76,13 @@ def convert_unisharp360(
         if progress_callback:
             progress_callback("unisharp_inference", 0, 1)
 
+        # SPAG4d only consumes the PLY. When SPAG4D_UNISHARP_NO_RENDER is set,
+        # pass --no-render so UniSHARP skips its gsplat GIF/preview rendering.
+        # This is required on platforms where gsplat's CUDA op cannot build
+        # (e.g. native Windows) and is faster everywhere. Requires a UniSHARP
+        # repo patched to accept --no-render; leave the env var unset otherwise.
+        extra_args = ["--no-render"] if os.environ.get("SPAG4D_UNISHARP_NO_RENDER") else None
+
         from .unisharp_adapter import run_unisharp_inference
         run = run_unisharp_inference(
             image_path=input_path,
@@ -87,6 +94,7 @@ def convert_unisharp360(
             device=("cuda:0" if device.type == "cuda" else "cpu"),
             save_ply=True,
             max_images=1,
+            extra_args=extra_args,
         )
         raw_ply = Path(run["ply_path"])
 

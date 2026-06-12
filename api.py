@@ -213,7 +213,7 @@ async def convert_panorama(
     grazing_angle: float = Query(90.0, ge=30.0, le=90.0),
     sparse_pruning: float = Query(0.0, ge=0.0, le=1.0),
     global_scale: float = Query(1.0, ge=0.1, le=10.0),
-    generator: Optional[str] = Query(None, pattern="^(da360|dap|sharp360|pager)$"),
+    generator: Optional[str] = Query(None, pattern="^(da360|dap|sharp360|unisharp360|pager)$"),
     side_count: int = Query(6, ge=2, le=12),
     seedvr2_upscale: bool = Query(False),
     sharp_include_caps: bool = Query(True),
@@ -222,6 +222,8 @@ async def convert_panorama(
     pager_metric: bool = Query(False),
     pager_use_sky: bool = Query(False),
     pager_use_normals: bool = Query(False),
+    unisharp_format_mode: str = Query("convert", pattern="^(copy|convert)$"),
+    unisharp_save_debug: bool = Query(False),
 ):
     """Convert uploaded panorama to Gaussian splat PLY."""
     if depth_min is not None and depth_max is not None and depth_min >= depth_max:
@@ -263,6 +265,8 @@ async def convert_panorama(
         "pager_metric": pager_metric,
         "pager_use_sky": pager_use_sky,
         "pager_use_normals": pager_use_normals,
+        "unisharp_format_mode": unisharp_format_mode,
+        "unisharp_save_debug": unisharp_save_debug,
     }
 
     suffix = Path(file.filename).suffix if file.filename else '.jpg'
@@ -294,6 +298,8 @@ async def convert_panorama(
         pager_metric=pager_metric,
         pager_use_sky=pager_use_sky,
         pager_use_normals=pager_use_normals,
+        unisharp_format_mode=unisharp_format_mode,
+        unisharp_save_debug=unisharp_save_debug,
     ))
 
     return JSONResponse({
@@ -323,6 +329,8 @@ async def process_job(
     pager_metric: bool = False,
     pager_use_sky: bool = False,
     pager_use_normals: bool = False,
+    unisharp_format_mode: str = "copy",
+    unisharp_save_debug: bool = False,
 ):
     """Process conversion job with GPU semaphore."""
     try:
@@ -355,6 +363,9 @@ async def process_job(
                 pager_metric=pager_metric,
                 pager_use_sky=pager_use_sky,
                 pager_use_normals=pager_use_normals,
+                sharp_backend="unisharp" if generator == "unisharp360" else "sharp",
+                unisharp_format_mode=unisharp_format_mode,
+                unisharp_save_debug=unisharp_save_debug,
             )
 
             job.result = result
