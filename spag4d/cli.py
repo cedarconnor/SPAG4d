@@ -37,8 +37,8 @@ def main():
 @click.option('--device', default='cuda', help='Device: cuda, cpu, mps')
 @click.option('--quiet', is_flag=True, help='Suppress progress output')
 @click.option('--mock-dap', is_flag=True, help='Use mock DAP model (for testing)')
-@click.option('--generator', type=click.Choice(['da360', 'dap', 'sharp360', 'pager']),
-              default=None, help='Generator mode: da360, dap, sharp360, or pager (overrides --depth-model)')
+@click.option('--generator', type=click.Choice(['da360', 'dap', 'sharp360', 'unisharp360', 'pager']),
+              default=None, help='Generator mode: da360, dap, sharp360, unisharp360, or pager (overrides --depth-model)')
 @click.option('--pager-metric', is_flag=True,
               help='PaGeR: use the metric scale head (default: scale-invariant depth)')
 @click.option('--pager-use-sky', is_flag=True,
@@ -49,6 +49,22 @@ def main():
               help='Number of faces for SHARP 360 projection (default: 6)')
 @click.option('--seedvr2-upscale', is_flag=True,
               help='Upscale faces with SeedVR2 before SHARP prediction')
+@click.option('--sharp-backend', type=click.Choice(['sharp', 'unisharp', 'hybrid']),
+              default='sharp', help='sharp360 backend (default: sharp)')
+@click.option('--unisharp-repo', type=click.Path(), default=None,
+              help='Path to a local clone of Insta360-Research-Team/UniSHARP')
+@click.option('--unisharp-python', type=click.Path(), default=None,
+              help='python executable of the unisharp conda env')
+@click.option('--unisharp-checkpoint', type=click.Path(), default=None,
+              help='UniSHARP checkpoint (step_XXXXXXX.pt)')
+@click.option('--unisharp-scale-align', type=click.Choice(['none', 'global', 'da360_grid']),
+              default='global', help='UniSHARP scale alignment mode (default: global)')
+@click.option('--unisharp-format-mode', type=click.Choice(['copy', 'convert']),
+              default='copy', help='UniSHARP PLY format handling (default: copy)')
+@click.option('--unisharp-save-debug', is_flag=True,
+              help='Keep UniSHARP raw PLY, gifs, and metadata')
+@click.option('--unisharp-raw-output-dir', type=click.Path(), default=None,
+              help='Persist the UniSHARP working dir here (default: temp dir)')
 def convert(
     input_path: str,
     output_path: str,
@@ -73,6 +89,14 @@ def convert(
     pager_use_normals: bool,
     side_count: int,
     seedvr2_upscale: bool,
+    sharp_backend: str,
+    unisharp_repo: str,
+    unisharp_python: str,
+    unisharp_checkpoint: str,
+    unisharp_scale_align: str,
+    unisharp_format_mode: str,
+    unisharp_save_debug: bool,
+    unisharp_raw_output_dir: str,
 ):
     """
     Convert equirectangular panorama to Gaussian splat PLY.
@@ -90,7 +114,9 @@ def convert(
 
     if not quiet:
         if generator == 'sharp360':
-            mode = f"SHARP 360 (sides={side_count}{', SeedVR2 upscale' if seedvr2_upscale else ''})"
+            mode = f"SHARP 360 (backend={sharp_backend}, sides={side_count}{', SeedVR2 upscale' if seedvr2_upscale else ''})"
+        elif generator == 'unisharp360':
+            mode = "UniSHARP 360 (native ERP)"
         elif sharp_refine:
             mode = "SHARP refined"
         else:
@@ -127,6 +153,14 @@ def convert(
             pager_metric=pager_metric,
             pager_use_sky=pager_use_sky,
             pager_use_normals=pager_use_normals,
+            sharp_backend=sharp_backend,
+            unisharp_repo=unisharp_repo,
+            unisharp_python=unisharp_python,
+            unisharp_checkpoint=unisharp_checkpoint,
+            unisharp_scale_align=unisharp_scale_align,
+            unisharp_format_mode=unisharp_format_mode,
+            unisharp_save_debug=unisharp_save_debug,
+            unisharp_raw_output_dir=unisharp_raw_output_dir,
         )
 
     if batch:
