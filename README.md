@@ -4,7 +4,7 @@ Convert 360° panoramic photos into explorable 3D Gaussian Splat scenes.
 
 SPAG-4D takes an equirectangular panorama and turns it into a 3D Gaussian Splat using one of **four** generator backends. Three are depth-based (**DA360**, **DAP**, **PaGeR**) and project a depth map into Gaussians via spherical geometry; the fourth (**SHARP 360**) uses Apple's [SHARP](https://github.com/apple/ml-sharp) model to predict Gaussians directly from perspective face crops, with DA360 depth alignment for inter-face consistency.
 
-Optional refinement fills disocclusion holes — areas behind foreground objects the single camera never saw — using novel-view generation from [OmniRoam](https://github.com/yuhengliu02/OmniRoam), with optional [SeedVR2](https://github.com/TencentARC/SeedVR) video upscaling.
+Optional refinement fills disocclusion holes — areas behind foreground objects the single camera never saw — using novel-view generation from [OmniRoam](https://github.com/yuhengliu02/OmniRoam) (default), with optional [SeedVR2](https://github.com/TencentARC/SeedVR) video upscaling. A higher-quality alternative, [ArtiFixer3D](https://github.com/nv-tlabs/ArtiFixer) (NVIDIA SIL, 14B generative repair in WSL2/Docker), can be enabled as an optional backend — see [Refinement](#refinement).
 
 <p align="center">
   <img src="docs/images/demo.gif" alt="SPAG-4D demo — a PaGeR Gaussian splat of a bell-tower interior" width="520">
@@ -16,10 +16,10 @@ Optional refinement fills disocclusion holes — areas behind foreground objects
 
 ## Quick Start (Windows)
 
-> Requires an NVIDIA GPU (6 GB+ VRAM for DA360/DAP, 8 GB+ for SHARP 360, 12 GB+ for PaGeR, 48 GB for OmniRoam refinement), [Git](https://git-scm.com/downloads), and ~30 GB disk space.
+> Requires an NVIDIA GPU (6 GB+ VRAM for DA360/DAP, 8 GB+ for SHARP 360, 12 GB+ for PaGeR, 48 GB for OmniRoam refinement), [Git](https://git-scm.com/downloads), and ~30 GB disk space. The optional **ArtiFixer3D** refine backend additionally needs WSL2 + Docker and ~140 GB disk (see [Refinement](#refinement)).
 
 1. Download and extract the SPAG-4D release `.zip`.
-2. Double-click **`install.bat`** and wait for "Installation Complete!"
+2. Double-click **`install.bat`** and wait for "Installation Complete!" Near the end it offers an optional **ArtiFixer3D** backend setup — press Enter to skip it (it's advanced and not needed for the core app).
 3. Double-click **`run.bat`**.
 4. Your browser opens to **http://localhost:7860** with a demo panorama loaded. Pick a generator and hit **Convert**.
 
@@ -172,7 +172,7 @@ A diffusion-free alternative: instead of distilling, it estimates per-frame dept
 
 ### ArtiFixer3D (rebuild — Python/API, optional)
 
-A higher-quality, slower alternative ([ArtiFixer3D](https://github.com/nv-tlabs/ArtiFixer), NVIDIA SIL). Instead of augmenting the cloud, it bridges the SPAG cloud to a COLMAP scene, runs a 14B generative disocclusion-repair model on rendered novel views, and **distills the corrections into a fresh 3DGRUT cloud** — then exports a standard 3DGS PLY back into SPAG. It runs as Docker subprocesses in WSL2 and needs one-time setup (see `INSTALL.md`).
+A higher-quality, slower alternative ([ArtiFixer3D](https://github.com/nv-tlabs/ArtiFixer), NVIDIA SIL). Instead of augmenting the cloud, it bridges the SPAG cloud to a COLMAP scene, runs a 14B generative disocclusion-repair model on rendered novel views, and **distills the corrections into a fresh 3DGRUT cloud** — then exports a standard 3DGS PLY back into SPAG. It runs as Docker subprocesses in WSL2. `install.bat` offers to configure it (optional prompt near the end); the heavy one-time steps are in [`INSTALL.md`](INSTALL.md#artifixer3d-refine-backend-optional-wsl2--docker).
 
 1. **Bridge** — orbit-render the cloud → hand-built COLMAP scene (anchor/novel split)
 2. **Reconstruct** — ArtiFixer's own 3DGRUT MCMC recon from the COLMAP scene
@@ -180,7 +180,7 @@ A higher-quality, slower alternative ([ArtiFixer3D](https://github.com/nv-tlabs/
 4. **Distill** — bake the 2D fills into a multiview-consistent 3D cloud
 5. **Bridge-back** — `export_ply` → standard 3DGS PLY → loaded by SPAG; anchor-PSNR/coverage guard
 
-From the web UI this is `POST /api/refine_v2?job_id=…&backend=artifixer3d`.
+From the web UI this is `POST /api/refine_v2?job_id=…&backend=artifixer3d`. Validated end-to-end on an outdoor night street scene: disocclusion holes at novel views dropped **17.3% → 0.0%** (mean **14.8% → 0.0%**) with coherent fill and 24.4 dB anchor faithfulness.
 
 ```python
 from spag4d.refine import refine_splat_v2, OmniRoamConfig            # distillation

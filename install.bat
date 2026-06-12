@@ -171,6 +171,70 @@ if exist "%SPAG4D_CACHE%\DA360_large.pth" (
     )
 )
 
+:: ──────────────────────────────────────────────────
+:: Optional: ArtiFixer3D refine backend (WSL2 + Docker)
+:: ──────────────────────────────────────────────────
+echo.
+echo ==================================================
+echo   Optional: ArtiFixer3D refine backend (advanced)
+echo ==================================================
+echo   Higher-quality disocclusion repair via a 14B model that runs in
+echo   WSL2 + Docker. OPTIONAL -- the SPAG core and the default OmniRoam
+echo   refine do not need any of this.
+echo.
+echo   Requirements: WSL2 + Docker + NVIDIA Container Toolkit, an A6000-class
+echo   GPU (~48 GB VRAM), and ~140 GB disk (57 GB image + 67 GB checkpoint +
+echo   23 GB Wan mirror). Full steps are in INSTALL.md.
+echo.
+set "WANT_AF3D=N"
+set /p WANT_AF3D="Configure the ArtiFixer3D backend now? (y/N): "
+if /i not "!WANT_AF3D!"=="y" (
+    echo    [SKIP] ArtiFixer3D not configured. See INSTALL.md to enable it later.
+    goto :Done
+)
+
+echo    Checking WSL2...
+wsl -l -q >nul 2>&1
+if errorlevel 1 (
+    echo    [SKIP] WSL2 not detected. Run 'wsl --install' first, then see INSTALL.md.
+    goto :Done
+)
+echo    Checking Docker inside WSL (distro: Ubuntu)...
+wsl -d Ubuntu bash -c "docker info" >nul 2>&1
+if errorlevel 1 (
+    echo    [SKIP] Docker not reachable in WSL. Start Docker / see INSTALL.md.
+    goto :Done
+)
+echo    [OK] WSL2 + Docker detected.
+
+:: Translate this repo dir to its WSL mount path, then copy the hydra wrapper
+:: configs into the ArtiFixer repo (the one step the installer can automate).
+:: Compute /mnt/<drive>/<path> in PowerShell — passing a Windows path through
+:: wsl.exe eats single backslashes, so do the conversion on the Windows side.
+set "REPO_DIR=%~dp0"
+if "!REPO_DIR:~-1!"=="\" set "REPO_DIR=!REPO_DIR:~0,-1!"
+set "REPO_WSL="
+for /f "usebackq delims=" %%i in (`powershell -NoProfile -Command "$p=$env:REPO_DIR; '/mnt/'+$p.Substring(0,1).ToLower()+$p.Substring(2).Replace('\','/')"`) do set "REPO_WSL=%%i"
+wsl -d Ubuntu bash -c "test -d $HOME/ArtiFixer/thirdparty/3DGRUT-ArtiFixer/configs" >nul 2>&1
+if errorlevel 1 (
+    echo    [INFO] ArtiFixer repo not found at ~/ArtiFixer.
+    echo           Clone it with submodules and build artifixer:cuda12 first; see INSTALL.md.
+) else (
+    wsl -d Ubuntu bash -c "cp '!REPO_WSL!/spag4d/refine/artifixer3d_resources/_artifixer_run.yaml' '!REPO_WSL!/spag4d/refine/artifixer3d_resources/_artifixer_distill.yaml' $HOME/ArtiFixer/thirdparty/3DGRUT-ArtiFixer/configs/" >nul 2>&1
+    if errorlevel 1 (
+        echo    [WARN] Could not copy hydra wrapper configs. Copy them manually; see INSTALL.md.
+    ) else (
+        echo    [OK] Hydra wrapper configs copied into the ArtiFixer repo.
+    )
+)
+echo.
+echo    Remaining one-time steps (see INSTALL.md "ArtiFixer3D backend"):
+echo      1. Clone ArtiFixer + submodules to ~/ArtiFixer, build the artifixer:cuda12 image
+echo      2. Place artifixer-14b.pt in /data/artifixer-checkpoints/
+echo      3. Run once in WSL:  bash spag4d/refine/artifixer3d_resources/setup_wan_mirror.sh
+echo      Then refine with backend=artifixer3d via POST /api/refine_v2; see README.
+
+:Done
 echo.
 echo ==================================================
 echo   Installation Complete!
@@ -179,7 +243,7 @@ echo   Run 'run.bat' to start SPAG-4D.
 echo   Opens http://localhost:7860 in your browser.
 echo.
 echo   Depth models: DAP + DA360 (+ optional PaGeR, non-commercial)
-echo   Refinement: Klein 9B synthesis (weights download on first use)
+echo   Refine: OmniRoam (default, WSL2) + optional ArtiFixer3D (WSL2/Docker)
 echo ==================================================
 echo.
 pause
