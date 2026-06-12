@@ -915,6 +915,15 @@ def convert_sharp360(
     include_caps: bool = True,
     cap_fov_degrees: float = 125.0,
     seam_latitude_degrees: float = 30.0,
+    # --- new: backend selection ---
+    backend: str = "sharp",
+    unisharp_repo: Optional[str] = None,
+    unisharp_python: Optional[str] = None,
+    unisharp_checkpoint: Optional[str] = None,
+    unisharp_scale_align: str = "global",
+    unisharp_format_mode: str = "copy",
+    unisharp_save_debug: bool = False,
+    unisharp_raw_output_dir: Optional[str] = None,
 ) -> dict:
     """Full SHARP 360 pipeline: ERP panorama -> merged 3DGS PLY.
 
@@ -931,6 +940,36 @@ def convert_sharp360(
     Returns:
         Dict with stats: {"num_gaussians", "num_faces", "output_path"}.
     """
+    backend = str(backend).lower().strip()
+    if backend not in {"sharp", "unisharp", "hybrid"}:
+        raise ValueError(
+            f"Unknown sharp360 backend {backend!r}. "
+            "Expected 'sharp', 'unisharp', or 'hybrid'."
+        )
+
+    if backend == "unisharp":
+        from .unisharp360 import convert_unisharp360
+        return convert_unisharp360(
+            input_path=input_path,
+            output_path=output_path,
+            device=device,
+            unisharp_repo=unisharp_repo,
+            unisharp_python=unisharp_python,
+            checkpoint_path=unisharp_checkpoint,
+            scale_align=unisharp_scale_align,
+            format_mode=unisharp_format_mode,
+            save_debug=unisharp_save_debug,
+            raw_output_dir=unisharp_raw_output_dir,
+            progress_callback=progress_callback,
+        )
+
+    if backend == "hybrid":
+        raise NotImplementedError(
+            "sharp360 backend='hybrid' is planned but not implemented. "
+            "Use 'sharp' or 'unisharp'."
+        )
+
+    # backend == "sharp": existing per-face pipeline (below), untouched.
     from PIL import Image
     from sharp.cli.predict import predict_image
     from sharp.utils.gaussians import Gaussians3D, apply_transform, save_ply
