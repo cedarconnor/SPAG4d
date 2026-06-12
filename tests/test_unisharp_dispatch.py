@@ -43,3 +43,41 @@ class TestBackendDispatch:
                 input_path="pano.jpg", output_path="out.ply", device=CPU,
                 backend="bogus",
             )
+
+
+class TestCoreRouting:
+    def test_generator_unisharp360_maps_to_backend(self, tmp_path, monkeypatch):
+        """SPAG4D.convert(generator='unisharp360') routes to convert_sharp360
+        with backend='unisharp'."""
+        import numpy as np
+        from PIL import Image
+        import spag4d.core as core_mod
+
+        # 2:1 ERP so the aspect gate passes.
+        img = tmp_path / "pano.jpg"
+        Image.fromarray(np.zeros((128, 256, 3), dtype=np.uint8)).save(img)
+        out = tmp_path / "out.ply"
+
+        captured = {}
+
+        def _fake_convert_sharp360(**kwargs):
+            captured.update(kwargs)
+            out_p = kwargs["output_path"]
+            # Produce a real file so the .stat() in core.py succeeds.
+            from tests._unisharp_fixtures import write_fake_unisharp_ply
+            write_fake_unisharp_ply(out_p, n_vertices=5)
+            return {"num_gaussians": 5, "num_faces": 0, "output_path": out_p}
+
+        # core.py imports convert_sharp360 lazily from spag4d.sharp360.
+        import spag4d.sharp360 as s
+        monkeypatch.setattr(s, "convert_sharp360", _fake_convert_sharp360)
+
+        conv = core_mod.SPAG4D(device="cpu", generator="unisharp360")
+        result = conv.convert(
+            input_path=str(img), output_path=str(out),
+            generator="unisharp360",
+            unisharp_repo="/repo", unisharp_checkpoint="/ckpt.pt",
+        )
+        assert captured["backend"] == "unisharp"
+        assert captured["unisharp_repo"] == "/repo"
+        assert result.splat_count == 5

@@ -105,6 +105,15 @@ class SPAG4D:
         pager_metric: bool = False,
         pager_use_sky: bool = False,
         pager_use_normals: bool = False,
+        # --- new: sharp360 backend selection ---
+        sharp_backend: str = "sharp",
+        unisharp_repo: Optional[str] = None,
+        unisharp_python: Optional[str] = None,
+        unisharp_checkpoint: Optional[str] = None,
+        unisharp_scale_align: str = "global",
+        unisharp_format_mode: str = "copy",
+        unisharp_save_debug: bool = False,
+        unisharp_raw_output_dir: Optional[str] = None,
     ) -> ConversionResult:
         """
         Convert equirectangular panorama to Gaussian splat PLY.
@@ -153,12 +162,17 @@ class SPAG4D:
 
         image_tensor = torch.from_numpy(np.array(img)).to(self.device)
 
-        # Dispatch to sharp360 generator if requested
+        # Dispatch to sharp360 / unisharp360 generators if requested
         active_generator = generator or self.generator
-        if active_generator == "sharp360":
+        if active_generator in ("sharp360", "unisharp360"):
             from .sharp360 import convert_sharp360
             from .seedvr2 import SeedVR2Config
             seedvr2_cfg = SeedVR2Config() if seedvr2_upscale else None
+
+            effective_backend = sharp_backend
+            if active_generator == "unisharp360":
+                effective_backend = "unisharp"
+
             result_dict = convert_sharp360(
                 input_path=str(input_path),
                 output_path=str(output_path),
@@ -169,6 +183,14 @@ class SPAG4D:
                 include_caps=sharp_include_caps,
                 cap_fov_degrees=sharp_cap_fov,
                 seam_latitude_degrees=sharp_seam_latitude,
+                backend=effective_backend,
+                unisharp_repo=unisharp_repo,
+                unisharp_python=unisharp_python,
+                unisharp_checkpoint=unisharp_checkpoint,
+                unisharp_scale_align=unisharp_scale_align,
+                unisharp_format_mode=unisharp_format_mode,
+                unisharp_save_debug=unisharp_save_debug,
+                unisharp_raw_output_dir=unisharp_raw_output_dir,
             )
             file_size = Path(output_path).stat().st_size
             return ConversionResult(
@@ -176,7 +198,7 @@ class SPAG4D:
                 splat_count=result_dict["num_gaussians"],
                 file_size=file_size,
                 processing_time=result_dict.get("processing_time", 0.0),
-                depth_range=(0.0, 0.0),
+                depth_range=result_dict.get("depth_range", (0.0, 0.0)),
                 panorama_size=(W, H),
             )
 
