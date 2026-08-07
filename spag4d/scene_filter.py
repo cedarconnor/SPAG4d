@@ -409,6 +409,11 @@ def prune_grazing_angle(
     safe_depth = np.maximum(depth_map, 0.01)
     relative_grad = grad_mag / safe_depth
 
+    # Compute curvature (discrete Laplacian)
+    lap_y = pad_depth[2:, 1:-1] + pad_depth[:-2, 1:-1] - 2.0 * depth_map
+    lap_x = pad_depth[1:-1, 2:] + pad_depth[1:-1, :-2] - 2.0 * depth_map
+    relative_curvature = np.sqrt(lap_x**2 + lap_y**2) / safe_depth
+
     # Convert max_angle to relative gradient threshold
     # tan(angle) ≈ depth_gradient / (depth * angular_spacing)
     # For a surface at angle θ from normal: relative_grad ≈ tan(θ) * angular_spacing
@@ -427,9 +432,11 @@ def prune_grazing_angle(
     theta = np.arctan2(-means[:, 2], means[:, 0])  # [-pi, pi]
     theta = theta % (2 * np.pi)  # [0, 2pi]
 
-    # Map to pixel coordinates
+    # Map to pixel coordinates.
+    # NOTE: the forward mapping (spherical_grid.create_spherical_grid) uses
+    # theta = (1 - uu/W) * 2*pi so the inverse must match
     px_row = np.clip((phi / np.pi * H).astype(int), 0, H - 1)
-    px_col = np.clip((theta / (2 * np.pi) * W).astype(int), 0, W - 1)
+    px_col = np.clip(((1.0 - theta / (2 * np.pi)) * W).astype(int), 0, W - 1)
 
     # Decide which Gaussians to keep
     if normals is not None:
@@ -443,8 +450,11 @@ def prune_grazing_angle(
         keep_mask_np = dot > np.cos(np.radians(max_angle_deg))
     else:
         # Fall back to the depth-gradient proxy.
+        # Keep a Gaussian if either the local slope is shallow OR
+        # the surface is locally smooth (low curvature) despite a steep slope
         sampled_grad = relative_grad[px_row, px_col]
-        keep_mask_np = sampled_grad < max_relative_grad
+        sampled_curvature = relative_curvature[px_row, px_col]
+        keep_mask_np = (sampled_grad < max_relative_grad) | (sampled_curvature < max_relative_grad)
     keep_mask = torch.from_numpy(keep_mask_np).to(gaussians['means'].device)
 
     pruned = {}
