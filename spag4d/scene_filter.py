@@ -427,9 +427,17 @@ def prune_grazing_angle(
     theta = np.arctan2(-means[:, 2], means[:, 0])  # [-pi, pi]
     theta = theta % (2 * np.pi)  # [0, 2pi]
 
-    # Map to pixel coordinates
+    # Map to pixel coordinates.
+    # NOTE: the forward mapping (spherical_grid.create_spherical_grid) uses
+    # theta = (1 - uu/W) * 2*pi -- azimuth *decreases* with pixel column, so
+    # the inverse must un-mirror it: uu = W * (1 - theta/(2*pi)). Using
+    # `theta/(2*pi)*W` directly (the un-mirrored inverse) samples the
+    # horizontal mirror of the Gaussian's true source column, which pulls
+    # gradient/normal values from the wrong side of the image -- on
+    # symmetric/repetitive geometry (e.g. building facades) this prunes real
+    # edge splats on one side using edge strength measured on the other.
     px_row = np.clip((phi / np.pi * H).astype(int), 0, H - 1)
-    px_col = np.clip((theta / (2 * np.pi) * W).astype(int), 0, W - 1)
+    px_col = np.clip(((1.0 - theta / (2 * np.pi)) * W).astype(int), 0, W - 1)
 
     # Decide which Gaussians to keep
     if normals is not None:
