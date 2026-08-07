@@ -409,13 +409,7 @@ def prune_grazing_angle(
     safe_depth = np.maximum(depth_map, 0.01)
     relative_grad = grad_mag / safe_depth
 
-    # Curvature (discrete Laplacian): large only where the depth trend itself
-    # kinks -- a true discontinuity/streaking edge. Raw gradient magnitude
-    # alone can't tell that apart from a real continuous surface simply
-    # viewed at a steep angle (e.g. a wall receding down a street), which
-    # also has a large first derivative but is still locally planar, i.e.
-    # near-zero second derivative. Used below to gate the gradient-proxy
-    # branch so it only prunes genuine kinks, not smooth-but-steep slopes.
+    # Compute curvature (discrete Laplacian)
     lap_y = pad_depth[2:, 1:-1] + pad_depth[:-2, 1:-1] - 2.0 * depth_map
     lap_x = pad_depth[1:-1, 2:] + pad_depth[1:-1, :-2] - 2.0 * depth_map
     relative_curvature = np.sqrt(lap_x**2 + lap_y**2) / safe_depth
@@ -440,13 +434,7 @@ def prune_grazing_angle(
 
     # Map to pixel coordinates.
     # NOTE: the forward mapping (spherical_grid.create_spherical_grid) uses
-    # theta = (1 - uu/W) * 2*pi -- azimuth *decreases* with pixel column, so
-    # the inverse must un-mirror it: uu = W * (1 - theta/(2*pi)). Using
-    # `theta/(2*pi)*W` directly (the un-mirrored inverse) samples the
-    # horizontal mirror of the Gaussian's true source column, which pulls
-    # gradient/normal values from the wrong side of the image -- on
-    # symmetric/repetitive geometry (e.g. building facades) this prunes real
-    # edge splats on one side using edge strength measured on the other.
+    # theta = (1 - uu/W) * 2*pi so the inverse must match
     px_row = np.clip((phi / np.pi * H).astype(int), 0, H - 1)
     px_col = np.clip(((1.0 - theta / (2 * np.pi)) * W).astype(int), 0, W - 1)
 
@@ -461,11 +449,9 @@ def prune_grazing_angle(
         dot = np.abs(np.sum(view_ray * sampled_normal, axis=1))
         keep_mask_np = dot > np.cos(np.radians(max_angle_deg))
     else:
-        # Fall back to the depth-gradient proxy. Gate on curvature too: keep
-        # a Gaussian if either the local slope is shallow (not grazing) OR
-        # the surface is locally smooth (low curvature) despite a steep
-        # slope -- only prune when both signals agree it's a genuine kink,
-        # not just a continuous surface viewed edge-on.
+        # Fall back to the depth-gradient proxy.
+        # Keep a Gaussian if either the local slope is shallow OR
+        # the surface is locally smooth (low curvature) despite a steep slope
         sampled_grad = relative_grad[px_row, px_col]
         sampled_curvature = relative_curvature[px_row, px_col]
         keep_mask_np = (sampled_grad < max_relative_grad) | (sampled_curvature < max_relative_grad)
